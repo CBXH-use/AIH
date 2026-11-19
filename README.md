@@ -5,10 +5,12 @@
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![electron](https://img.shields.io/badge/Electron-33-47848F)
+[![Release](https://github.com/CBXH-use/AIH/actions/workflows/release.yml/badge.svg)](https://github.com/CBXH-use/AIH/actions/workflows/release.yml)
+[![最新版本](https://img.shields.io/github/v/release/CBXH-use/AIH?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/CBXH-use/AIH/releases/latest)
 
 ## 下载
 
-前往 [Releases](../../releases/latest) 获取最新版本：
+**[⬇ 前往 Releases 下载最新版本](https://github.com/CBXH-use/AIH/releases/latest)**
 
 | 文件 | 说明 |
 | --- | --- |
