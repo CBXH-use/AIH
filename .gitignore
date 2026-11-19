@@ -10,3 +10,5 @@ release/
 .env.*
 build/runtime/*.zip
 build/runtime/*.part
+.tools/
+.gh-config/
