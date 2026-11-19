@@ -13,3 +13,4 @@ build/runtime/*.part
 .tools/
 .gh-config/
 .gh-cache/
+promo/

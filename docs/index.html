@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AIH · AI HOUSE — Windows 本地 AI 工作台（无需 Ollama）</title>
+    <meta
+      name="description"
+      content="AIH 是一个 Windows 上的本地 AI 工作台：不用装 Ollama、不用敲命令行，自动发现电脑里的本地模型，一键下载并运行，Agent 能读写文件、执行任务。开源免费，数据留在本机。"
+    />
+    <meta property="og:title" content="AIH · AI HOUSE — Windows 本地 AI 工作台" />
+    <meta
+      property="og:description"
+      content="不装 Ollama、不敲命令行：下载即用的本地 AI 工作台，数据留在你的电脑上。"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://cbxh-use.github.io/AIH/screenshots/01-task-agent.png" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231b1b17'/%3E%3Ctext x='16' y='23' font-size='19' font-weight='700' font-family='Segoe UI,Arial' fill='%23f6f6ec' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg: #f7f6ef;
+        --panel: #ffffff;
+        --ink: #1d211c;
+        --muted: #5f665e;
+        --line: #e3e1d5;
+        --accent: #2f6f57;
+        --accent-dark: #24523f;
+        --accent-soft: #e4efe8;
+        --amber: #9a6b16;
+        --radius: 16px;
+      }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      img { max-width: 100%; display: block; }
+      .wrap { width: min(1120px, calc(100% - 48px)); margin: 0 auto; }
+      header.site {
+        position: sticky; top: 0; z-index: 10;
+        background: rgba(247, 246, 239, 0.88);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--line);
+      }
+      .nav { display: flex; align-items: center; gap: 24px; height: 64px; }
+      .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--ink); }
+      .brand .mark {
+        width: 30px; height: 30px; border-radius: 8px; background: #1b1b17; color: #f6f6ec;
+        display: grid; place-items: center; font-weight: 700; font-size: 16px;
+      }
+      .brand small { display: block; font-weight: 500; font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+      .nav-links { display: flex; gap: 20px; margin-left: auto; font-size: 14px; }
+      .nav-links a { color: var(--muted); }
+      .nav-links a:hover { color: var(--ink); }
+      .nav .gh {
+        font-size: 14px; border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px;
+        color: var(--ink); background: #fff;
+      }
+      .hero { display: grid; grid-template-columns: 1.02fr 1.1fr; gap: 48px; align-items: center; padding: 64px 0 56px; }
+      .hero h1 { font-size: clamp(30px, 4vw, 46px); line-height: 1.2; margin: 0 0 18px; letter-spacing: -0.02em; }
+      .hero h1 em { font-style: normal; color: var(--accent); }
+      .hero p.lead { font-size: 17px; color: var(--muted); margin: 0 0 26px; }
+      .badges { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 26px; }
+      .pill { font-size: 12.5px; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 5px 11px; color: var(--muted); }
+      .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+      .btn {
+        display: inline-flex; align-items: center; gap: 8px; border-radius: 12px; padding: 12px 20px;
+        font-size: 15px; font-weight: 600; border: 1px solid transparent; cursor: pointer;
+      }
+      .btn.primary { background: var(--accent); color: #fff; }
+      .btn.primary:hover { background: var(--accent-dark); text-decoration: none; }
+      .btn.ghost { background: #fff; border-color: var(--line); color: var(--ink); }
+      .btn.ghost:hover { border-color: #c9c7ba; text-decoration: none; }
+      .btn small { font-weight: 400; opacity: .8; font-size: 12px; }
+      .mini { font-size: 13px; color: var(--muted); margin-top: 14px; }
+      .mini strong { color: var(--accent); font-weight: 600; }
+      .shot {
+        border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff;
+        box-shadow: 0 24px 60px -30px rgba(30, 40, 30, .45), 0 2px 6px rgba(0, 0, 0, .04);
+      }
+      .shot .bar { height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 12px; border-bottom: 1px solid var(--line); background: #fbfaf6; }
+      .shot .bar i { width: 9px; height: 9px; border-radius: 50%; background: #dcd9cc; display: block; }
+      .shot .bar span { font-size: 11px; color: var(--muted); margin-left: 8px; }
+      section { padding: 56px 0; }
+      .kicker { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin: 0 0 10px; }
+      h2 { font-size: clamp(24px, 3vw, 32px); margin: 0 0 12px; letter-spacing: -0.01em; }
+      .sub { color: var(--muted); margin: 0 0 34px; max-width: 720px; }
+      .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+      .card h3 { margin: 12px 0 6px; font-size: 16.5px; }
+      .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+      .ico { width: 34px; height: 34px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; }
+      .ico svg { width: 18px; height: 18px; }
+      .gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      .gallery figure { margin: 0; }
+      .gallery img { border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px -22px rgba(0, 0, 0, .5); }
+      .gallery figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; }
+      .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; counter-reset: step; }
+      .step { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; position: relative; }
+      .step::before {
+        counter-increment: step; content: counter(step);
+        width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+        display: grid; place-items: center; font-size: 13px; font-weight: 700; margin-bottom: 12px;
+      }
+      .step h3 { margin: 0 0 6px; font-size: 16px; }
+      .step p { margin: 0; color: var(--muted); font-size: 14.5px; }
+      .download { background: #1f2b24; color: #eef2ec; border-radius: 24px; padding: 46px; }
+      .download h2 { color: #fff; }
+      .download .sub { color: #b9c4ba; }
+      .dl-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 26px 0 18px; }
+      .dl { border: 1px solid #3a4a3f; border-radius: 16px; padding: 22px; background: #25332b; }
+      .dl .name { font-weight: 700; font-size: 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .dl .size { font-size: 12px; color: #a9b7ab; font-weight: 400; }
+      .dl p { margin: 6px 0 16px; color: #b9c4ba; font-size: 13.5px; }
+      .dl .btn { width: 100%; justify-content: center; }
+      .dl .btn.primary { background: #e8f0e9; color: #1f2b24; }
+      .dl .btn.primary:hover { background: #fff; }
+      .dl .btn.ghost { background: transparent; border-color: #45584a; color: #dfe7e0; }
+      .dl .btn.ghost:hover { border-color: #7d9484; }
+      .mirror { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13.5px; }
+      .mirror a { color: #b9d4c2; }
+      .fineprint { color: #9aa89c; font-size: 12.5px; margin-top: 22px; line-height: 1.7; }
+      details { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 10px; }
+      details summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+      details p { color: var(--muted); margin: 10px 0 0; font-size: 14.5px; }
+      footer.site { border-top: 1px solid var(--line); padding: 34px 0 46px; color: var(--muted); font-size: 13.5px; }
+      .foot { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; justify-content: space-between; }
+      @media (max-width: 900px) {
+        .hero { grid-template-columns: 1fr; gap: 30px; padding-top: 40px; }
+        .grid, .steps { grid-template-columns: 1fr 1fr; }
+        .dl-cards { grid-template-columns: 1fr; }
+        .nav-links { display: none; }
+        .download { padding: 30px 22px; }
+      }
+      @media (max-width: 620px) {
+        .grid, .steps, .gallery { grid-template-columns: 1fr; }
+        .wrap { width: calc(100% - 32px); }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site">
+      <div class="wrap nav">
+        <a class="brand" href="#top"><span class="mark">A</span><span>AIH<small>AI HOUSE</small></span></a>
+        <nav class="nav-links">
+          <a href="#features">功能</a>
+          <a href="#gallery">截图</a>
+          <a href="#download">下载</a>
+          <a href="#faq">FAQ</a>
+          <a href="#build">源码</a>
+        </nav>
+        <a class="gh" href="https://github.com/CBXH-use/AIH" target="_blank" rel="noopener">GitHub ↗</a>
+      </div>
+    </header>
+
+    <main id="top">
+      <div class="wrap">
+        <section class="hero">
+          <div>
+            <h1>Windows 上的<br />本地 <em>AI 工作台</em></h1>
+            <p class="lead">
+              不装 Ollama、不敲命令行。打开 AIH 自动发现电脑里的模型，没有就一键下载并运行；
+              任务模式下，Agent 能读写文件、执行命令、查资料——不只是聊天。
+            </p>
+            <div class="badges">
+              <span class="pill">免费开源 MIT</span>
+              <span class="pill">无需 Ollama</span>
+              <span class="pill">数据不出本机</span>
+              <span class="pill">Windows 10 / 11 x64</span>
+            </div>
+            <div class="cta">
+              <a class="btn primary" href="#download">⬇ 下载 AIH <small id="hero-version"></small></a>
+              <a class="btn ghost" href="https://github.com/CBXH-use/AIH" target="_blank" rel="noopener">查看源码</a>
+            </div>
+            <p class="mini">最新版本 <strong id="version">v0.1.1</strong> · 安装包约 102 MB · <a href="https://github.com/CBXH-use/AIH/releases/latest" target="_blank" rel="noopener">查看更新日志</a></p>
+          </div>
+          <div class="shot">
+            <div class="bar"><i></i><i></i><i></i><span>AIH · 任务模式</span></div>
+            <img src="screenshots/01-task-agent.png" alt="AIH 任务模式界面：Agent 读取文件、调用工具并给出方案" />
+          </div>
+        </section>
+
+        <section id="features">
+          <p class="kicker">Why AIH</p>
+          <h2>下载就能用，不用折腾环境</h2>
+          <p class="sub">
+            同样是想在本机跑大模型，别人要装 Ollama、找模型目录、敲命令；AIH 把这些收进了一个窗口。
+          </p>
+          <div class="grid">
+            <div class="card">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><circle cx="18" cy="17" r="3"/></svg>
+              </div>
+              <h3>不用装 Ollama</h3>
+              <p>直接读取 Ollama 的 manifests/blobs，服务没启动也能列出模型；同时扫描全盘 GGUF 与 LM Studio 目录。</p>
+            </div>
+            <div class="card">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              </div>
+              <h3>一键下载并运行</h3>
+              <p>Qwen、DeepSeek R1、Llama、Gemma、Phi 等推荐模型在软件内下载，内置 llama.cpp 运行时直接跑，无需额外安装。</p>
+            </div>
+            <div class="card">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m8 10 2 2-2 2m5 0h3"/></svg>
+              </div>
+              <h3>任务模式能干活</h3>
+              <p>读写工作区文件、执行命令、联网检索、调用知识库与插件；高风险操作先确认，写文件前自动备份。</p>
+            </div>
+            <div class="card">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/></svg>
+              </div>
+              <h3>多智能体 + 插件</h3>
+              <p>前端工程师、写作者、研究员等角色预设，插件广场与 MCP 扩展工具链，知识库让回答有据可依。</p>
+            </div>
+            <div class="card">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 8h10M7 12h6"/><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 16h4"/></svg>
+              </div>
+              <h3>云端 API 也能接</h3>
+              <p>DeepSeek、OpenAI、通义千问、智谱、Moonshot、硅基流动等 OpenAI 兼容服务，填 Base URL 和 Key 即可用。</p>
+            </div>
+            <div class="card">
+              <div class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v6c0 4.4 3 7.5 7 9 4-1.5 7-4.6 7-9V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg>
+              </div>
+              <h3>本地优先，隐私可控</h3>
+              <p>对话、模型、知识库索引都在本机；不接入遥测，只有你主动添加的云端 API 才会联网。</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="gallery">
+          <p class="kicker">Screenshots</p>
+          <h2>看一眼就懂</h2>
+          <p class="sub">模型与 API、插件广场、知识库、智能体，都在一个窗口里。</p>
+          <div class="gallery">
+            <figure><img src="screenshots/02-models.png" alt="模型与 API 页面：本地模型列表、推荐模型与 API 接入" loading="lazy" /><figcaption>模型与 API：本地模型、推荐下载与云端 API 一处管理</figcaption></figure>
+            <figure><img src="screenshots/03-plugins.png" alt="插件广场：声明式插件与 MCP 扩展" loading="lazy" /><figcaption>插件广场：工具、技能、角色与 MCP</figcaption></figure>
+            <figure><img src="screenshots/04-knowledge.png" alt="知识库：导入文档并为对话提供依据" loading="lazy" /><figcaption>知识库：导入资料，让回答有依据</figcaption></figure>
+            <figure><img src="screenshots/05-agents.png" alt="智能体：内置角色与自定义预设" loading="lazy" /><figcaption>智能体：为不同工作准备专属角色</figcaption></figure>
+          </div>
+        </section>
+
+        <section id="start">
+          <p class="kicker">Quick start</p>
+          <h2>三步开始</h2>
+          <p class="sub">不用改环境变量，不用启动额外服务。首次启动会扫描已有模型，没有也能在软件里下载。</p>
+          <div class="steps">
+            <div class="step"><h3>下载并安装</h3><p>运行安装包，或解压便携版直接打开 AIH.exe。仅支持 Windows 10 / 11 x64。</p></div>
+            <div class="step"><h3>选择模型</h3><p>自动发现 Ollama / GGUF / LM Studio 模型；没有就选一个推荐模型，一键下载并运行。</p></div>
+            <div class="step"><h3>开始干活</h3><p>「对话」模式聊天；「任务」模式让 Agent 读文件、跑命令、查知识库，全程可确认可回滚。</p></div>
+          </div>
+        </section>
+
+        <section id="download">
+          <div class="download">
+            <h2>下载 AIH <span id="download-version"></span></h2>
+            <p class="sub">免费开源，MIT License。安装包暂未做代码签名，SmartScreen 提示时点「更多信息 → 仍要运行」即可。</p>
+            <div class="dl-cards">
+              <div class="dl">
+                <div class="name">安装版 <span class="size" id="size-setup">约 102 MB</span></div>
+                <p>推荐。自动创建桌面快捷方式，支持选择安装目录。</p>
+                <a class="btn primary" id="dl-setup" href="https://github.com/CBXH-use/AIH/releases/latest">下载安装包 (.exe)</a>
+                <div style="margin-top: 10px; font-size: 12.5px; color: #a9b7ab;">
+                  <a id="dl-setup-cn" href="#" style="display: none;">国内加速下载 ↗</a>
+                </div>
+              </div>
+              <div class="dl">
+                <div class="name">便携版 <span class="size" id="size-zip">约 130 MB</span></div>
+                <p>解压即用，不写注册表，适合放在移动硬盘或 U 盘。</p>
+                <a class="btn ghost" id="dl-zip" href="https://github.com/CBXH-use/AIH/releases/latest">下载便携版 (.zip)</a>
+                <div style="margin-top: 10px; font-size: 12.5px; color: #a9b7ab;">
+                  <a id="dl-zip-cn" href="#" style="display: none;">国内加速下载 ↗</a>
+                </div>
+              </div>
+            </div>
+            <div class="mirror">
+              <a href="https://github.com/CBXH-use/AIH/releases/latest" target="_blank" rel="noopener">全部版本与校验值 ↗</a>
+              <a href="https://github.com/CBXH-use/AIH/issues" target="_blank" rel="noopener">问题反馈 ↗</a>
+              <a href="https://github.com/CBXH-use/AIH" target="_blank" rel="noopener">GitHub 仓库 ↗</a>
+            </div>
+            <p class="fineprint">
+              国内下载慢时，可使用上面的第三方加速链接（ghproxy 等公共服务，非本项目运营）；也可以参考仓库里的《国内下载方案》用 Gitee 镜像或网盘分流。
+              安装包 SHA256 与版本说明见 <a href="https://github.com/CBXH-use/AIH/releases/latest" target="_blank" rel="noopener" style="color: #b9d4c2;">Release 页面</a>。
+            </p>
+          </div>
+        </section>
+
+        <section id="faq">
+          <p class="kicker">FAQ</p>
+          <h2>常见问题</h2>
+          <details open>
+            <summary>Windows 提示“已保护你的电脑”怎么办？</summary>
+            <p>安装包暂未做代码签名，SmartScreen 会拦截未知发布者。点击「更多信息 → 仍要运行」即可；也可以使用便携版 zip。校验值见 Release 说明。</p>
+          </details>
+          <details>
+            <summary>杀毒软件报毒？</summary>
+            <p>未签名的 Electron 应用偶尔会被误报。请核对 Release 中的 SHA256，并把安装包加入信任；如果仍然担心，可以从源码自行构建。</p>
+          </details>
+          <details>
+            <summary>需要什么配置？</summary>
+            <p>Windows 10 / 11 x64，建议 16GB 内存起步。内置运行时使用 CPU 推理，建议选择 7B / 8B 的 Q4_K_M 模型；如果装了 Ollama，AIH 会优先用它（可 GPU 加速）。</p>
+          </details>
+          <details>
+            <summary>模型下载到哪里？占多少空间？</summary>
+            <p>默认保存到剩余空间最大的磁盘的 <code>AIH Models</code> 目录，可在模型页点「打开模型文件夹」。7B Q4_K_M 模型约 4~5 GB。</p>
+          </details>
+          <details>
+            <summary>能完全离线使用吗？</summary>
+            <p>可以。内置 llama.cpp 运行时和本地模型都在本机运行，首次下载模型之后断网也能对话和干活；只有你接入的云端 API 模型需要联网。</p>
+          </details>
+          <details>
+            <summary>支持 macOS / Linux 吗？</summary>
+            <p>当前只提供 Windows 10 / 11 x64 版本。其他平台可以按 README 的「从源码构建」自行尝试。</p>
+          </details>
+        </section>
+
+        <section id="build">
+          <p class="kicker">Open source</p>
+          <h2>开源，可自行构建</h2>
+          <p class="sub">项目使用 Electron 33 + React 18 + Vite 构建，内置 llama.cpp 运行时。源码、Issue 与更新都在 GitHub。</p>
+          <div class="cta">
+            <a class="btn primary" href="https://github.com/CBXH-use/AIH" target="_blank" rel="noopener">⭐ 去 GitHub 点 Star</a>
+            <a class="btn ghost" href="https://github.com/CBXH-use/AIH/releases" target="_blank" rel="noopener">全部 Release</a>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site">
+      <div class="wrap foot">
+        <div>AIH · AI HOUSE — 本地优先的 AI Agent 桌面工作台 · MIT License</div>
+        <div>
+          <a href="https://github.com/CBXH-use/AIH" target="_blank" rel="noopener">GitHub</a> ·
+          <a href="https://github.com/CBXH-use/AIH/releases" target="_blank" rel="noopener">Releases</a> ·
+          <a href="https://github.com/CBXH-use/AIH/issues" target="_blank" rel="noopener">Issues</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      ;(function () {
+        var REPO = 'CBXH-use/AIH'
+        var RELEASE_PAGE = 'https://github.com/' + REPO + '/releases/latest'
+        function mb(bytes) {
+          return bytes ? (bytes / 1024 / 1024).toFixed(0) + ' MB' : ''
+        }
+        function setText(id, text) {
+          var el = document.getElementById(id)
+          if (el && text) el.textContent = text
+        }
+        function setLink(id, href, text) {
+          var el = document.getElementById(id)
+          if (!el || !href) return
+          el.href = href
+          if (text) el.textContent = text
+        }
+        function setMirror(id, url) {
+          var el = document.getElementById(id)
+          if (!el || !url) return
+          el.href = 'https://ghproxy.net/' + url
+          el.style.display = 'inline'
+        }
+        function load() {
+          fetch('https://api.github.com/repos/' + REPO + '/releases/latest', {
+            headers: { Accept: 'application/vnd.github+json' }
+          })
+            .then(function (res) {
+              if (!res.ok) throw new Error('HTTP ' + res.status)
+              return res.json()
+            })
+            .then(function (rel) {
+              if (!rel || !rel.tag_name) return
+              setText('version', rel.tag_name)
+              setText('hero-version', rel.tag_name)
+              setText('download-version', rel.tag_name)
+              var assets = rel.assets || []
+              var setup = assets.filter(function (a) { return /-setup\.exe$/.test(a.name) })[0]
+              var zip = assets.filter(function (a) { return /-win-x64\.zip$/.test(a.name) })[0]
+              if (setup) {
+                setLink('dl-setup', setup.browser_download_url, '下载安装包 (.exe)')
+                setText('size-setup', mb(setup.size))
+                setMirror('dl-setup-cn', setup.browser_download_url)
+              }
+              if (zip) {
+                setLink('dl-zip', zip.browser_download_url, '下载便携版 (.zip)')
+                setText('size-zip', mb(zip.size))
+                setMirror('dl-zip-cn', zip.browser_download_url)
+              }
+            })
+            .catch(function () {
+              // API 不可达时保留 Release 页面链接作为兜底
+            })
+        }
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', load)
+        } else {
+          load()
+        }
+      })()
+    </script>
+  </body>
+</html>
