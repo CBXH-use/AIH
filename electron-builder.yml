@@ -1,0 +1,35 @@
+appId: com.aih.harness
+productName: AIH
+copyright: Copyright © 2026 AIH
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+extraResources:
+  # 内置 llama.cpp 运行时（llama-server），首次使用直接本地解压，无需联网下载
+  - from: build/runtime
+    to: runtime
+asar: true
+electronDist: node_modules/electron/dist
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+  artifactName: AIH-${version}-win-${arch}.${ext}
+nsis:
+  artifactName: AIH-${version}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: AIH
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
