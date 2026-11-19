@@ -25,7 +25,7 @@
 
 > 安装包暂未进行代码签名。若 Windows SmartScreen 提示“已保护你的电脑”，请点击“更多信息 → 仍要运行”。校验值见对应 Release 说明。
 
-**国内下载慢？** 可以先看 [官网下载页](https://cbxh-use.github.io/AIH/) 的第三方加速说明，或把 Release 附件转存到网盘 / Gitee 镜像（见 `promo/国内下载方案.md`）。
+**国内下载慢？** 可以先看 [下载与国内加速说明](docs/download.md)，或用官网下载页的第三方加速链接；也可以用 Gitee 镜像 / 网盘分流。
 
 ## 为什么是 AIH
 
