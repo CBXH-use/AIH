@@ -10,7 +10,7 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "fetch:runtime": "node scripts/fetch-runtime.mjs",
-    "dist": "node scripts/fetch-runtime.mjs && electron-vite build && electron-builder --win nsis zip",
+    "dist": "node scripts/fetch-runtime.mjs && electron-vite build && electron-builder --win nsis zip --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "devDependencies": {
