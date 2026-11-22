@@ -18,6 +18,7 @@ import { SettingsPage } from './pages/SettingsPage'
 export default function App() {
   const t = useT()
   const ready = useAppStore((s) => s.ready)
+  const initError = useAppStore((s) => s.initError)
   const page = useAppStore((s) => s.page)
   const settings = useAppStore((s) => s.settings)
   const init = useAppStore((s) => s.init)
@@ -33,7 +34,7 @@ export default function App() {
     const offChat = window.aih.onChatEvent((e) => useAppStore.getState().handleChatEvent(e))
     const offScan = window.aih.onScanEvent((e) => useAppStore.getState().handleScanEvent(e))
     const offDeploy = window.aih.onDeployEvent((e) => useAppStore.getState().handleDeployEvent(e))
-    const offApproval = window.aih.onApproval((req) => useAppStore.setState({ approval: req }))
+    const offApproval = window.aih.onApproval((req) => useAppStore.getState().addApproval(req))
     const offSettings = window.aih.onSettings((s) => useAppStore.setState({ settings: s }))
     return () => {
       offChat()
@@ -69,6 +70,34 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [newSession])
+
+  if (initError) {
+    return (
+      <div className="app-shell">
+        <WindowTitleBar />
+        <div className="splash">
+          <div className="brand-mark large">A</div>
+          <div className="splash-name">{t('app.startFailed')}</div>
+          <div style={{ maxWidth: 640, textAlign: 'center', color: 'var(--muted)', fontSize: 13, lineHeight: 1.7, padding: '0 24px' }}>
+            {initError}
+            <br />
+            {t('app.startFailedHint')}
+          </div>
+          <div style={{ display: 'flex', gap: 12, marginTop: 20 }}>
+            <button className="btn primary" onClick={() => void init()}>
+              {t('app.retry')}
+            </button>
+            <button className="btn ghost" onClick={() => void window.aih.openDataDir()}>
+              {t('app.openDataDir')}
+            </button>
+            <button className="btn ghost" onClick={() => void window.aih.windowClose()}>
+              {t('app.quit')}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (!ready) {
     return (

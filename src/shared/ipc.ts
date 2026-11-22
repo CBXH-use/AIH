@@ -27,6 +27,8 @@ import type {
 export const IPC = {
   bootstrap: 'app:bootstrap',
   info: 'app:info',
+  appCheckUpdate: 'app:check-update',
+  appOpenDataDir: 'app:open-data-dir',
   settingsUpdate: 'settings:update',
   harnessSnapshots: 'harness:snapshots',
   harnessSnapshotSave: 'harness:snapshot-save',
@@ -111,9 +113,19 @@ export interface ApiResult<T = void> {
   error?: string
 }
 
+export interface UpdateCheckResult {
+  current: string
+  latest: string
+  hasUpdate: boolean
+  url: string
+  notes?: string
+}
+
 export interface AihApi {
   bootstrap(): Promise<Bootstrap>
   info(): Promise<AppInfo>
+  checkUpdate(): Promise<ApiResult<UpdateCheckResult>>
+  openDataDir(): Promise<void>
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>
   saveHarnessSnapshot(label: string): Promise<HarnessSnapshot[]>
   restoreHarnessSnapshot(id: string): Promise<HarnessConfig>

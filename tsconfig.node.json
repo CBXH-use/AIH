@@ -9,7 +9,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "types": ["node"],
-    "outDir": "./node_modules/.tmp/node",
+    "outDir": "./.typecheck/node",
     "baseUrl": ".",
     "paths": { "@shared/*": ["src/shared/*"] }
   },

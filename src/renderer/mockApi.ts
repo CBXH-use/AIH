@@ -1,4 +1,4 @@
-﻿﻿﻿﻿import type { AihApi } from '@shared/ipc'
+﻿﻿﻿import type { AihApi } from '@shared/ipc'
 import type {
   AgentPreset,
   AppSettings,
@@ -429,6 +429,18 @@ const mockApi: AihApi = {
   async info() {
     return { version: '0.1.0', platform: 'win32', online: true, userDataDir: 'C:\\Users\\ASUS\\AppData\\Roaming\\aih' }
   },
+  async checkUpdate() {
+    return {
+      ok: true,
+      data: {
+        current: '0.1.2',
+        latest: '0.1.2',
+        hasUpdate: false,
+        url: 'https://github.com/CBXH-use/AIH/releases'
+      }
+    }
+  },
+  async openDataDir() {},
   async updateSettings(patch) {
     Object.assign(settings, patch)
     return clone(settings)

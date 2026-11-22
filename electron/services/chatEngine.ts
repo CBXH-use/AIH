@@ -32,7 +32,7 @@ export interface ChatEngineDeps {
   plugins: PluginService
   emit: (e: ChatStreamEvent) => void
   emitApproval: (req: ApprovalRequest) => void
-  requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>
+  requestApproval: (req: ApprovalRequest, signal?: AbortSignal) => Promise<ApprovalDecision>
 }
 
 const EMPTY_USAGE = { input: 0, output: 0, compressed: 0 }
@@ -533,6 +533,7 @@ export class ChatEngine {
     const session = this.deps.store.getSession(sessionId)
     if (!session) throw new Error('会话不存在')
     if (this.runs.has(sessionId)) throw new Error('该会话正在运行')
+    if (!session.model) throw new Error('请先在顶部选择或部署一个模型')
     const idx = session.messages.findIndex((m) => m.id === messageId)
     if (idx < 0) throw new Error('消息不存在')
     let userIdx = -1
@@ -546,12 +547,28 @@ export class ChatEngine {
     const userMsg = session.messages[userIdx]
     const text = textOf(userMsg)
     const images = imagesOf(userMsg).map((d) => ({ dataUrl: d }))
+    // 先保存快照：send() 可能失败（会话被占用、模型失效等），失败时必须完整回滚
+    const snapshotMessages = session.messages
+    const snapshotContext = session.context
+    const snapshotTitle = session.title
     session.messages = session.messages.slice(0, userIdx)
     // 历史被截断后旧的压缩摘要游标可能失效，直接重置，避免丢失后续上下文
     session.context = undefined
     session.updatedAt = Date.now()
     this.deps.store.upsertSession(session)
-    await this.send(sessionId, text, images)
+    try {
+      await this.send(sessionId, text, images)
+    } catch (err) {
+      const current = this.deps.store.getSession(sessionId)
+      if (current) {
+        current.messages = snapshotMessages
+        current.context = snapshotContext
+        current.title = snapshotTitle
+        current.updatedAt = Date.now()
+        this.deps.store.upsertSession(current)
+      }
+      throw err
+    }
   }
 
   async compressContext(sessionId: string): Promise<{ before: number; after: number }> {
@@ -720,10 +737,16 @@ export class ChatEngine {
     } finally {
       if (currentAssistant) currentAssistant.streaming = false
       session.updatedAt = Date.now()
-      this.deps.store.upsertSession(session)
+      const stillExists = !!this.deps.store.getSession(session.id)
+      if (stillExists) {
+        this.deps.store.upsertSession(session)
+        this.emitStatus(session)
+        this.deps.emit({ sessionId: session.id, messageId: currentAssistant?.id || '', type: 'message-done' })
+      } else {
+        // 运行中会话被用户删除：finally 不能再把它写回去
+        this.alwaysAllow.delete(session.id)
+      }
       this.runs.delete(session.id)
-      this.emitStatus(session)
-      this.deps.emit({ sessionId: session.id, messageId: currentAssistant?.id || '', type: 'message-done' })
       void fatal
     }
   }
@@ -1237,17 +1260,39 @@ export class ChatEngine {
     return JSON.stringify(a).slice(0, 500)
   }
 
+  /** 审批指纹：按“工具 + 关键参数”放行，而不是按工具名整体放行（避免一次 always 后任意命令直通） */
+  private approvalFingerprint(call: ToolCall): string {
+    const args = call.arguments || {}
+    if (call.name === 'shell') {
+      return `shell:${String(args.command || '').trim().replace(/\s+/g, ' ').toLowerCase()}`
+    }
+    if (call.name === 'write_file' || call.name === 'edit_file') {
+      return `${call.name}:${String(args.path || '').trim().toLowerCase()}`
+    }
+    if (call.name === 'web_fetch') {
+      try {
+        const u = new URL(String(args.url || ''))
+        return `web_fetch:${u.protocol}//${u.host}`
+      } catch {
+        return `web_fetch:${String(args.url || '')}`
+      }
+    }
+    return `${call.name}:${JSON.stringify(args)}`
+  }
+
   private async decide(
     session: Session,
     spec: ToolSpec,
     call: ToolCall,
     risk: RiskAssessment,
-    preview: string
+    preview: string,
+    signal: AbortSignal
   ): Promise<boolean> {
     const mode = session.permissionMode
     if (mode === 'readonly' && !spec.readOnly) return false
     const catastrophic = risk.reasons.includes('catastrophic')
-    const always = this.alwaysAllow.get(session.id)?.has(call.name)
+    const fingerprint = this.approvalFingerprint(call)
+    const always = this.alwaysAllow.get(session.id)?.has(fingerprint)
     if (always && !catastrophic) return true
 
     let needAsk = false
@@ -1255,6 +1300,7 @@ export class ChatEngine {
     else if (mode === 'auto-safe') needAsk = risk.level === 'high'
     else if (mode === 'full') needAsk = catastrophic
     if (!needAsk) return true
+    if (signal.aborted) return false
 
     const req: ApprovalRequest = {
       id: randomUUID(),
@@ -1270,15 +1316,17 @@ export class ChatEngine {
     this.deps.emitApproval(req)
     let decision: ApprovalDecision = 'deny'
     try {
-      decision = await this.deps.requestApproval(req)
+      // 把 AbortSignal 接到审批上：用户点“停止”或关闭窗口时立即 deny，而不是等 5 分钟超时
+      decision = await this.deps.requestApproval(req, signal)
     } catch {
       decision = 'deny'
     }
+    if (signal.aborted) return false
     session.status = prevStatus === 'waiting-approval' ? 'running' : prevStatus
     this.emitStatus(session)
     if (decision === 'allow-always') {
       if (!this.alwaysAllow.has(session.id)) this.alwaysAllow.set(session.id, new Set())
-      this.alwaysAllow.get(session.id)!.add(call.name)
+      this.alwaysAllow.get(session.id)!.add(fingerprint)
       return true
     }
     return decision === 'allow'
@@ -1322,7 +1370,7 @@ export class ChatEngine {
       } catch {
         risk = { level: 'medium', reasons: ['无法评估风险'] }
       }
-      const allowed = signal.aborted ? false : await this.decide(session, spec, call, risk, this.previewOf(call))
+      const allowed = signal.aborted ? false : await this.decide(session, spec, call, risk, this.previewOf(call), signal)
       ready.push({
         call,
         spec,

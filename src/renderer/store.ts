@@ -53,11 +53,13 @@ interface AppState {
   scanning: boolean
   scanningStartedAt: number | null
   deploy: Record<string, DeployEvent>
-  approval: ApprovalRequest | null
+  approvals: ApprovalRequest[]
+  initError: string | null
   toasts: ToastItem[]
   pluginRefreshing: boolean
 
   init(): Promise<void>
+  addApproval(req: ApprovalRequest): void
   refreshSessions(): Promise<void>
   refreshAgents(): Promise<void>
   refreshKnowledge(): Promise<void>
@@ -79,7 +81,7 @@ interface AppState {
   attachKnowledge(ids: string[]): Promise<void>
   send(text: string, images?: { dataUrl: string; name?: string }[]): Promise<boolean>
   stop(): Promise<void>
-  approve(decision: ApprovalChoice): Promise<void>
+  approve(requestId: string, decision: ApprovalChoice): Promise<void>
   regenerate(messageId: string): Promise<void>
   compress(): Promise<void>
 
@@ -253,35 +255,51 @@ export const useAppStore = create<AppState>((set, get) => {
     scanning: false,
     scanningStartedAt: null,
     deploy: {},
-    approval: null,
+    approvals: [],
+    initError: null,
     toasts: [],
     pluginRefreshing: false,
 
     async init() {
-      const boot = await window.aih.bootstrap()
-      const sorted = boot.sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)
-      const firstVisible = sorted.find((s) => !s.archived)
-      const activeProject =
-        (firstVisible && boot.projects.find((p) => p.id === firstVisible.projectId && !p.archived)?.id) ||
-        boot.projects.find((p) => !p.archived)?.id ||
-        'default'
-      set({
-        ready: true,
-        settings: boot.settings,
-        sessions: sorted,
-        projects: boot.projects,
-        activeProjectId: activeProject,
-        hardware: boot.hardware,
-        currentId: firstVisible?.id || null,
-        page: firstVisible && firstVisible.mode === 'chat' ? 'chat' : 'task',
-        agents: boot.agents,
-        plugins: boot.plugins,
-        pluginStates: boot.pluginStates,
-        knowledge: boot.knowledgeBases,
-        providers: boot.providers,
-        models: boot.models,
-        info: boot.info
-      })
+      try {
+        const boot = await window.aih.bootstrap()
+        const sorted = boot.sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)
+        const firstVisible = sorted.find((s) => !s.archived)
+        const activeProject =
+          (firstVisible && boot.projects.find((p) => p.id === firstVisible.projectId && !p.archived)?.id) ||
+          boot.projects.find((p) => !p.archived)?.id ||
+          'default'
+        set({
+          ready: true,
+          initError: null,
+          settings: boot.settings,
+          sessions: sorted,
+          projects: boot.projects,
+          activeProjectId: activeProject,
+          hardware: boot.hardware,
+          currentId: firstVisible?.id || null,
+          page: firstVisible && firstVisible.mode === 'chat' ? 'chat' : 'task',
+          agents: boot.agents,
+          plugins: boot.plugins,
+          pluginStates: boot.pluginStates,
+          knowledge: boot.knowledgeBases,
+          providers: boot.providers,
+          models: boot.models,
+          info: boot.info
+        })
+      } catch (err) {
+        // 启动失败时给出可重试的错误页，而不是永久卡在 Splash
+        set({ ready: false, initError: err instanceof Error ? err.message : String(err) })
+      }
+    },
+
+    addApproval(req) {
+      set((state) => ({ approvals: [...state.approvals.filter((a) => a.id !== req.id), req] }))
+      const { currentId, sessions } = get()
+      if (req.sessionId !== currentId) {
+        const title = sessions.find((s) => s.id === req.sessionId)?.title || ''
+        get().toast(msg(`「${title}」有新的操作等待确认`, `"${title}" is waiting for approval`), 'warn')
+      }
     },
 
     async refreshSessions() {
@@ -546,12 +564,12 @@ export const useAppStore = create<AppState>((set, get) => {
       await window.aih.stopChat(cur.id)
     },
 
-    async approve(decision) {
-      const req = get().approval
+    async approve(requestId, decision) {
+      const req = get().approvals.find((a) => a.id === requestId)
       if (!req) return
-      set({ approval: null })
-      await window.aih.approve(req.id, decision)
-      mapSession(req.sessionId, (s) => ({ ...s, status: decision === 'deny' ? 'running' : 'running' }))
+      set((state) => ({ approvals: state.approvals.filter((a) => a.id !== requestId) }))
+      await window.aih.approve(requestId, decision)
+      mapSession(req.sessionId, (s) => ({ ...s, status: 'running' }))
     },
 
     async regenerate(messageId) {

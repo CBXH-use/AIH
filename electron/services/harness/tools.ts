@@ -42,7 +42,9 @@ const SENSITIVE = /(^|[\\/])(\.ssh|\.aws|\.gnupg|\.config[\\/]gcloud)([\\/]|$)|(
 export function isInside(child: string, parent: string | null): boolean {
   if (!parent) return false
   const rel = relative(normalize(parent), normalize(child))
-  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
+  // rel === '' 表示 child 就是 parent 本身（例如工作区根目录），必须视为在工作区内
+  if (rel === '') return true
+  return !rel.startsWith('..') && !isAbsolute(rel)
 }
 
 export function resolvePath(input: string, ctx: ToolContext): { abs: string; inside: boolean } {
@@ -85,9 +87,41 @@ function isBinary(buf: Buffer): boolean {
 }
 
 async function readText(abs: string): Promise<string> {
+  const st = await fsp.stat(abs).catch(() => null)
+  if (!st || !st.isFile()) throw new Error('文件不存在或不是普通文件')
+  if (st.size > 12 * 1024 * 1024) {
+    throw new Error(`文件过大（${(st.size / 1024 / 1024).toFixed(1)}MB），请用 grep 或 offset/limit 分段读取`)
+  }
   const buf = await fsp.readFile(abs)
   if (isBinary(buf)) throw new Error('该文件是二进制文件，无法作为文本读取')
   return buf.toString('utf8')
+}
+
+/** web_fetch 的出站地址校验：拒绝本机、内网与常见私有网段，避免 Agent 被诱导访问本地服务 */
+function assertSafeUrl(raw: string): URL {
+  const url = new URL(raw)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('只支持 http/https 链接')
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^0\./.test(host)
+  ) {
+    throw new Error('不允许访问本机或内网地址')
+  }
+  const m = /^172\.(\d+)\./.exec(host)
+  if (m) {
+    const second = Number(m[1])
+    if (second >= 16 && second <= 31) throw new Error('不允许访问内网地址')
+  }
+  return url
 }
 
 const CODE_EXTENSIONS = new Set([
@@ -249,8 +283,13 @@ function shellRisk(command: string, ctx: ToolContext): RiskAssessment {
       return { level: 'high', reasons: ['blocked-pattern', `命中危险命令规则：${deny}`] }
     }
   }
+  // 先按命令分隔符切段：只读前缀匹配必须逐段判断，否则 `git status; Remove-Item ...` 会被误判为只读
+  const segments = trimmed
+    .split(/\r?\n|;|&&|\|\||\||`|\$\(/)
+    .map((s) => s.trim())
+    .filter(Boolean)
   const safe = /^(git\s+(status|diff|log|show|branch|remote|rev-parse)|dir|ls|cat|type|where|which|node\s+-v|npm\s+-v|python\s+--version|pip\s+--version|echo|pwd|Get-ChildItem|Get-Content|Get-Location|Test-Path)\b/i
-  if (safe.test(trimmed)) return medium('运行只读命令')
+  if (segments.length > 0 && segments.every((s) => safe.test(s))) return medium('运行只读命令')
   return high('执行 Shell 命令可能修改文件或系统状态')
 }
 
@@ -455,14 +494,24 @@ export function buildTools(): Record<string, ToolSpec> {
     },
     async execute(args, ctx) {
       const { abs } = resolvePath(String(args.path || ''), ctx)
-      const text = await readText(abs)
+      let text = await readText(abs)
+      let sizeTruncated = false
+      if (text.length > MAX_READ_CHARS) {
+        text = text.slice(0, MAX_READ_CHARS)
+        sizeTruncated = true
+      }
       const lines = text.split(/\r?\n/)
       const offset = Math.max(1, Number(args.offset) || 1)
       const limit = Math.min(4000, Math.max(1, Number(args.limit) || 2000))
       const slice = lines.slice(offset - 1, offset - 1 + limit)
       const body = slice.map((line, i) => `${String(offset + i).padStart(5, ' ')}→${line}`).join('\n')
+      const tail = sizeTruncated
+        ? '\n…（文件过大，仅读取前 16 万字符，可用 offset/limit 精确读取）'
+        : offset - 1 + limit < lines.length
+          ? '\n…（还有更多内容，可用 offset 继续读取）'
+          : ''
       return {
-        output: clamp(`文件：${fmtPath(abs, ctx)}（共 ${lines.length} 行）\n${body}${offset - 1 + limit < lines.length ? '\n…（还有更多内容，可用 offset 继续读取）' : ''}`)
+        output: clamp(`文件：${fmtPath(abs, ctx)}（共 ${lines.length} 行）\n${body}${tail}`)
       }
     }
   })
@@ -624,7 +673,7 @@ export function buildTools(): Record<string, ToolSpec> {
       if (!command) return { output: '命令不能为空', isError: true }
       const cwdArg = args.cwd ? String(args.cwd) : ctx.workspaceDir || process.cwd()
       const { abs, inside } = resolvePath(cwdArg, ctx)
-      if (ctx.workspaceDir && !inside && ctx.permissionMode !== 'full') {
+      if (ctx.workspaceDir && ctx.settings.harness.safety.workspaceOnly && !inside && ctx.permissionMode !== 'full') {
         return { output: '安全策略：命令工作目录必须在工作区内。', isError: true }
       }
       const st = await fsp.stat(abs).catch(() => null)
@@ -680,14 +729,42 @@ export function buildTools(): Record<string, ToolSpec> {
     assess: () => medium('访问互联网'),
     async execute(args, _ctx, signal) {
       const raw = String(args.url || '').trim()
-      if (!/^https?:\/\//i.test(raw)) return { output: '只支持 http/https 链接', isError: true }
-      const res = await fetch(raw, {
+      let url: URL
+      try {
+        url = assertSafeUrl(raw)
+      } catch (err) {
+        return { output: err instanceof Error ? err.message : '网址不合法', isError: true }
+      }
+      const res = await fetch(url, {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AIH/0.1)' },
         signal: AbortSignal.any([signal, AbortSignal.timeout(20000)])
       })
       if (!res.ok) return { output: `抓取失败：HTTP ${res.status}`, isError: true }
+      const declared = Number(res.headers.get('content-length') || 0)
+      if (declared > 5 * 1024 * 1024) {
+        return { output: `响应过大（${(declared / 1024 / 1024).toFixed(1)}MB），已拒绝抓取`, isError: true }
+      }
       const type = res.headers.get('content-type') || ''
-      const body = await res.text()
+      let body = ''
+      if (res.body) {
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let bytes = 0
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          bytes += value.byteLength
+          body += decoder.decode(value, { stream: true })
+          if (bytes > 2 * 1024 * 1024) {
+            await reader.cancel().catch(() => undefined)
+            break
+          }
+          if (signal.aborted) throw new Error('已取消')
+        }
+        body += decoder.decode()
+      } else {
+        body = await res.text()
+      }
       const text = type.includes('html') ? stripHtml(body) : body
       return { output: text.length > 12000 ? text.slice(0, 12000) + '\n…（已截断）' : text }
     }

@@ -502,12 +502,20 @@ export class ModelService {
       const path = model.filePath
       const inModelsDir = path && this.runtime.isInsideModelsDir(path)
       if (!path || !inModelsDir) return { ok: false, error: '该模型在 AIH 模型目录之外，为避免误删不会自动删除' }
-      try {
-        await fsp.unlink(path)
-      } catch (err) {
-        return { ok: false, error: `删除失败：${String(err)}` }
+      // Windows 上 llama-server 会锁住模型文件，必须先停服并等进程退出再删
+      if (this.runtime.runningModel === path) await this.runtime.stopAndWait()
+      let lastError: unknown = null
+      for (let i = 0; i < 5; i++) {
+        try {
+          await fsp.unlink(path)
+          lastError = null
+          break
+        } catch (err) {
+          lastError = err
+          await new Promise((resolve) => setTimeout(resolve, 300))
+        }
       }
-      if (this.runtime.runningModel === path) this.runtime.stopServer()
+      if (lastError) return { ok: false, error: `删除失败：${String(lastError)}` }
       this.models = this.models.filter((m) => m.id !== modelId)
       this.providers = [...this.providers.filter((p) => p.id !== BUILTIN_RUNTIME_ID), this.runtime.provider()]
       return { ok: true }

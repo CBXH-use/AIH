@@ -12,6 +12,8 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
 const api: AihApi = {
   bootstrap: () => ipcRenderer.invoke(IPC.bootstrap),
   info: () => ipcRenderer.invoke(IPC.info),
+  checkUpdate: () => ipcRenderer.invoke(IPC.appCheckUpdate),
+  openDataDir: () => ipcRenderer.invoke(IPC.appOpenDataDir),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
   saveHarnessSnapshot: (label: string) => ipcRenderer.invoke(IPC.harnessSnapshotSave, label),
   restoreHarnessSnapshot: (id: string) => ipcRenderer.invoke(IPC.harnessRestore, id),

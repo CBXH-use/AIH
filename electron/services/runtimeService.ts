@@ -1,7 +1,8 @@
 import { app } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
+import { createHash } from 'crypto'
 import { createServer } from 'net'
-import { existsSync, readdirSync, statSync } from 'fs'
+import { createReadStream, existsSync, readdirSync, statSync } from 'fs'
 import { promises as fsp } from 'fs'
 import { cpus } from 'os'
 import { basename, dirname, join, normalize, sep } from 'path'
@@ -19,6 +20,8 @@ export const BUILTIN_RUNTIME_NAME = 'AIH 本地运行时'
  */
 const RUNTIME_BUILD = 'b12359'
 const RUNTIME_ZIP = `llama-${RUNTIME_BUILD}-bin-win-cpu-x64.zip`
+// 与 scripts/fetch-runtime.mjs 共用同一份 SHA-256；运行期从第三方镜像下载后必须校验再解压
+const RUNTIME_SHA256 = '837c1655e87df3b66989f4be33a792a1399c785bf259038dc75c900096683e69'
 const RUNTIME_GH = `https://github.com/ggml-org/llama.cpp/releases/download/${RUNTIME_BUILD}/${RUNTIME_ZIP}`
 const RUNTIME_URLS = [
   RUNTIME_GH,
@@ -29,6 +32,16 @@ const RUNTIME_URLS = [
 ]
 
 const RUNTIME_START_PORT = 18211
+
+function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256')
+    createReadStream(path)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('end', () => resolve(hash.digest('hex')))
+      .on('error', reject)
+  })
+}
 
 function runCommand(cmd: string, args: string[], timeoutMs = 120000): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
@@ -69,7 +82,7 @@ export class RuntimeService {
   private currentModel: string | null = null
   private runtimeExe: string | null = null
   private downloadAbort: AbortController | null = null
-  private pending: Promise<{ ok: boolean; error?: string }> | null = null
+  private pending: { target: string; promise: Promise<{ ok: boolean; error?: string; provider?: Provider }> } | null = null
   private lastLog = ''
   onModelsChanged: () => void = () => {}
 
@@ -139,9 +152,10 @@ export class RuntimeService {
     const used = new Set<string>()
     const models: ModelInfo[] = []
     for (const filePath of paths) {
+      const key = normalize(filePath).toLowerCase()
+      if (used.has(key)) continue
+      used.add(key)
       const name = basename(filePath).replace(/\.gguf$/i, '')
-      if (used.has(name)) continue
-      used.add(name)
       let size: number | undefined
       try {
         size = statSync(filePath).size
@@ -243,6 +257,13 @@ export class RuntimeService {
       onStep?.(2 + Math.round(p.ratio * 14), `下载内置运行时 ${Math.round(p.ratio * 100)}%${speed ? ` · ${speed}` : ''}`)
     })
 
+    // 镜像可能返回错误页面或被篡改，解压并执行 exe 之前必须校验
+    const digest = await sha256File(zipPath)
+    if (digest !== RUNTIME_SHA256) {
+      await fsp.unlink(zipPath).catch(() => undefined)
+      throw new Error('内置运行时校验失败（下载不完整或镜像被篡改），请检查网络后重试')
+    }
+
     await this.extractRuntime(zipPath, runtimeDir, onStep, true)
     const exe = this.findRuntimeExe()
     if (!exe) throw new Error('内置运行时解压失败')
@@ -306,16 +327,25 @@ export class RuntimeService {
 
   /** 启动（或切换到）指定 GGUF 模型。 */
   async ensure(modelPath?: string, onStep?: (pct: number, text: string) => void): Promise<{ ok: boolean; error?: string; provider?: Provider }> {
-    if (this.pending) return this.pending
-    this.pending = this.doEnsure(modelPath, onStep).finally(() => {
-      this.pending = null
+    const target = this.resolveTarget(modelPath)
+    if (!target) return { ok: false, error: '还没有可运行的模型，请先下载一个模型' }
+    if (this.pending) {
+      // 同一个目标：复用进行中的启动；不同目标：先等它结束，避免把别的模型的 Promise 返回给调用方
+      if (this.pending.target === target) return this.pending.promise
+      await this.pending.promise.catch(() => undefined)
+    }
+    const promise: Promise<{ ok: boolean; error?: string; provider?: Provider }> = this.doEnsure(target, onStep).finally(() => {
+      if (this.pending && this.pending.promise === promise) this.pending = null
     })
-    return this.pending
+    this.pending = { target, promise }
+    return promise
   }
 
-  private async doEnsure(modelPath?: string, onStep?: (pct: number, text: string) => void): Promise<{ ok: boolean; error?: string; provider?: Provider }> {
-    const target = modelPath || this.currentModel || this.listModels()[0]?.filePath
-    if (!target) return { ok: false, error: '还没有可运行的模型，请先下载一个模型' }
+  private resolveTarget(modelPath?: string): string {
+    return modelPath || this.currentModel || this.listModels()[0]?.filePath || ''
+  }
+
+  private async doEnsure(target: string, onStep?: (pct: number, text: string) => void): Promise<{ ok: boolean; error?: string; provider?: Provider }> {
     if (!existsSync(target)) return { ok: false, error: `模型文件不存在：${target}` }
 
     if (this.child && this.currentModel === target && this.port && (await this.healthy(this.port))) {
@@ -423,6 +453,28 @@ export class RuntimeService {
     }
     this.port = null
     this.currentModel = null
+  }
+
+  /** 停止并等待进程退出，用户删除模型前必须调用（否则 Windows 上文件被占用无法删除） */
+  async stopAndWait(timeoutMs = 3000): Promise<void> {
+    const child = this.child
+    this.port = null
+    this.currentModel = null
+    if (!child) return
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs)
+      child.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      try {
+        child.kill()
+      } catch {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+    if (this.child === child) this.child = null
   }
 
   dispose() {

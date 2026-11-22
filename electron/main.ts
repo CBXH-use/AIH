@@ -18,9 +18,9 @@ import type {
   Session,
   SessionMode
 } from '@shared/types'
-import { IPC, type ApiResult, type ChatSendPayload, type ScanOptions } from '@shared/ipc'
+import { IPC, type ApiResult, type ChatSendPayload, type ScanOptions, type UpdateCheckResult } from '@shared/ipc'
 import { BUILTIN_AGENTS, DEFAULT_HARNESS } from '@shared/defaults'
-import { getStore } from './services/store'
+import { getStore, type StoreLoadWarning } from './services/store'
 import { ModelService } from './services/modelService'
 import { KnowledgeService } from './services/knowledgeService'
 import { PluginService } from './services/pluginService'
@@ -37,19 +37,47 @@ let hardwareInfo: HardwareInfo | null = null
 
 const pendingApprovals = new Map<string, { resolve: (d: ApprovalDecision) => void; timer: NodeJS.Timeout }>()
 
+// 单实例锁：两个实例同时运行会各自整库回写，互相覆盖会话/设置
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+}
+
 function broadcast(channel: string, payload: unknown) {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
   }
 }
 
-function askApproval(req: ApprovalRequest): Promise<ApprovalDecision> {
+function askApproval(req: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
+    let timer: NodeJS.Timeout | null = null
+    let settled = false
+    const onAbort = () => done('deny')
+    const done = (d: ApprovalDecision) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
       pendingApprovals.delete(req.id)
-      resolve('deny')
-    }, 5 * 60 * 1000)
-    pendingApprovals.set(req.id, { resolve, timer })
+      signal?.removeEventListener('abort', onAbort)
+      resolve(d)
+    }
+    timer = setTimeout(() => done('deny'), 5 * 60 * 1000)
+    pendingApprovals.set(req.id, { resolve: done, timer })
+    if (signal) {
+      if (signal.aborted) {
+        done('deny')
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
   })
 }
 
@@ -165,6 +193,38 @@ function fallbackHardware(): HardwareInfo {
     totalRamGb,
     freeRamGb,
     tier: totalRamGb >= 32 ? 'high' : totalRamGb >= 16 ? 'mid' : 'low'
+  }
+}
+
+function isNewerVersion(latest: string, current: string): boolean {
+  const a = latest.split('.').map((n) => Number(n) || 0)
+  const b = current.split('.').map((n) => Number(n) || 0)
+  for (let i = 0; i < 3; i++) {
+    const x = a[i] || 0
+    const y = b[i] || 0
+    if (x !== y) return x > y
+  }
+  return false
+}
+
+/** 数据文件损坏时给出可操作的提示，而不是静默清空 */
+async function showStoreWarning(warning: StoreLoadWarning): Promise<void> {
+  const detail = warning.recoveredFromBackup
+    ? `已自动从备份恢复大部分数据。\n原文件已保留：${warning.corruptFile}`
+    : `原文件已保留：${warning.corruptFile}\n可以先用文本编辑器检查，或把该文件反馈给我们。`
+  try {
+    const res = await dialog.showMessageBox({
+      type: 'warning',
+      title: '数据文件需要修复',
+      message: warning.recoveredFromBackup ? 'AIH 已从备份恢复数据' : 'AIH 的数据文件读取失败，已使用空白数据启动',
+      detail: `${warning.message}\n\n${detail}`,
+      buttons: ['知道了', '打开数据目录'],
+      defaultId: 0,
+      cancelId: 0
+    })
+    if (res.response === 1) void shell.openPath(getStore().dir)
+  } catch {
+    /* 对话框失败不影响启动 */
   }
 }
 
@@ -287,6 +347,34 @@ function registerIpc() {
     userDataDir: getStore().dir
   }))
 
+  ipcMain.handle(IPC.appCheckUpdate, async (): Promise<ApiResult<UpdateCheckResult>> => {
+    try {
+      const res = await fetch('https://api.github.com/repos/CBXH-use/AIH/releases/latest', {
+        headers: { 'User-Agent': `AIH/${app.getVersion()}`, Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(8000)
+      })
+      if (!res.ok) return { ok: false, error: `检查更新失败：HTTP ${res.status}` }
+      const data = (await res.json()) as { tag_name?: string; html_url?: string; body?: string }
+      const latest = String(data.tag_name || '').replace(/^v/i, '')
+      const current = app.getVersion()
+      return {
+        ok: true,
+        data: {
+          current,
+          latest,
+          hasUpdate: !!latest && isNewerVersion(latest, current),
+          url: String(data.html_url || 'https://github.com/CBXH-use/AIH/releases'),
+          notes: typeof data.body === 'string' ? data.body.slice(0, 4000) : ''
+        }
+      }
+    } catch (err) {
+      return { ok: false, error: `检查更新失败：${err instanceof Error ? err.message : String(err)}` }
+    }
+  })
+  ipcMain.handle(IPC.appOpenDataDir, () => {
+    void shell.openPath(getStore().dir)
+  })
+
   ipcMain.handle(IPC.settingsUpdate, (_e, patch: Partial<AppSettings>) => {
     const settings = getStore().updateSettings(patch)
     broadcast(IPC.settingsUpdate, settings)
@@ -357,7 +445,6 @@ function registerIpc() {
       'agentId',
       'model',
       'permissionMode',
-      'workspaceDir',
       'knowledgeBaseIds',
       'pinned',
       'archived'
@@ -580,47 +667,75 @@ function registerIpc() {
   })
 }
 
-app.whenReady().then(async () => {
-  const store = getStore()
-  ensureDefaultProject()
-  store.cleanupBackups(store.settings.harness.safety.backupRetentionDays ?? 7)
-  hardwareInfo = await getHardwareInfo().catch(() => fallbackHardware())
-  modelService = new ModelService(
-    store,
-    (e) => broadcast(IPC.modelsScan + ':event', e),
-    (e) => broadcast(IPC.modelsDeploy + ':event', e)
-  )
-  knowledgeService = new KnowledgeService(store)
-  pluginService = new PluginService(store)
-  chatEngine = new ChatEngine({
-    store,
-    models: modelService,
-    knowledge: knowledgeService,
-    plugins: pluginService,
-    emit: (e) => broadcast('chat:event', e),
-    emitApproval: (req) => broadcast('chat:approval', req),
-    requestApproval: askApproval
-  })
+if (hasSingleInstanceLock) {
+  app.whenReady()
+    .then(async () => {
+      const store = getStore()
+      ensureDefaultProject()
+      store.cleanupBackups(store.settings.harness.safety.backupRetentionDays ?? 7)
+      modelService = new ModelService(
+        store,
+        (e) => broadcast(IPC.modelsScan + ':event', e),
+        (e) => broadcast(IPC.modelsDeploy + ':event', e)
+      )
+      knowledgeService = new KnowledgeService(store)
+      pluginService = new PluginService(store)
+      chatEngine = new ChatEngine({
+        store,
+        models: modelService,
+        knowledge: knowledgeService,
+        plugins: pluginService,
+        emit: (e) => broadcast('chat:event', e),
+        emitApproval: (req) => broadcast('chat:approval', req),
+        requestApproval: askApproval
+      })
 
-  registerIpc()
-  createWindow()
+      registerIpc()
+      createWindow()
 
-  // 老用户启动时后台快速探测本地模型（不扫描磁盘 GGUF，避免拖慢启动）
-  if (store.settings.onboardingDone) {
-    setTimeout(() => {
-      if (!scanning) {
-        scanning = modelService.scan({ quick: true })
-        void scanning.finally(() => {
-          scanning = null
+      // 先把窗口显示出来，再做硬件探测：nvidia-smi + PowerShell CIM 串行可能耗时数秒
+      void getHardwareInfo()
+        .then((info) => {
+          hardwareInfo = info
         })
-      }
-    }, 1200)
-  }
+        .catch(() => {
+          hardwareInfo = fallbackHardware()
+        })
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
-})
+      if (store.warning) setTimeout(() => void showStoreWarning(store.warning!), 800)
+
+      // 老用户启动时后台快速探测本地模型（不扫描磁盘 GGUF，避免拖慢启动）
+      if (store.settings.onboardingDone) {
+        setTimeout(() => {
+          if (!scanning) {
+            scanning = modelService.scan({ quick: true })
+            void scanning
+              .catch(() => undefined)
+              .finally(() => {
+                scanning = null
+              })
+          }
+        }, 1200)
+      }
+
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) createWindow()
+      })
+    })
+    .catch((err) => {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error('[main] startup failed', err)
+      try {
+        dialog.showErrorBox(
+          'AIH 启动失败',
+          `${message}\n\n请重启 AIH 重试；如果持续失败，请到数据目录备份 aih-data*.json 后反馈问题。`
+        )
+      } catch {
+        /* ignore */
+      }
+      app.quit()
+    })
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

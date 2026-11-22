@@ -45,7 +45,30 @@ export function SettingsPage() {
   const [snapshotLabel, setSnapshotLabel] = useState('')
   const [saving, setSaving] = useState(false)
   const [rawOpen, setRawOpen] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [updateMsg, setUpdateMsg] = useState<string | null>(null)
   const avatarInputRef = useRef<HTMLInputElement>(null)
+
+  const checkUpdate = async () => {
+    setChecking(true)
+    setUpdateMsg(null)
+    try {
+      const res = await window.aih.checkUpdate()
+      if (!res.ok || !res.data) {
+        setUpdateMsg(res.error || t('settings.checkFailed'))
+        return
+      }
+      const data = res.data
+      if (data.hasUpdate) {
+        setUpdateMsg(t('settings.updateAvailable', { version: data.latest }))
+        await window.aih.openExternal(data.url)
+      } else {
+        setUpdateMsg(t('settings.upToDate', { version: data.current }))
+      }
+    } finally {
+      setChecking(false)
+    }
+  }
 
   useEffect(() => {
     setDraft(settings.harness)
@@ -656,7 +679,7 @@ export function SettingsPage() {
               <div className="about-grid">
                 <div>
                   <span>{t('settings.version')}</span>
-                  <strong>AIH {info?.version || '0.1.0'}</strong>
+                  <strong>AIH {info?.version || '—'}</strong>
                 </div>
                 <div>
                   <span>{t('settings.dataDir')}</span>
@@ -669,7 +692,34 @@ export function SettingsPage() {
                 <kbd>{t('settings.shortcutSend')}</kbd>
                 <kbd>{t('settings.shortcutStop')}</kbd>
               </div>
-              <p className="muted small">{t('settings.hardwareHint')}</p>
+              <div className="settings-inline-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                <button className="btn ghost sm" onClick={() => void checkUpdate()} disabled={checking}>
+                  {checking ? t('settings.checkingUpdate') : t('settings.checkUpdate')}
+                </button>
+                <button className="btn ghost sm" onClick={() => void window.aih.openDataDir()}>
+                  {t('settings.openDataDir')}
+                </button>
+                <button
+                  className="btn ghost sm"
+                  onClick={() => void window.aih.openExternal('https://github.com/CBXH-use/AIH')}
+                >
+                  {t('settings.github')}
+                </button>
+                <button
+                  className="btn ghost sm"
+                  onClick={() => void window.aih.openExternal('https://cbxh-use.github.io/AIH/')}
+                >
+                  {t('settings.website')}
+                </button>
+                <button
+                  className="btn ghost sm"
+                  onClick={() => void window.aih.openExternal('https://github.com/CBXH-use/AIH/issues')}
+                >
+                  {t('settings.feedback')}
+                </button>
+              </div>
+              {updateMsg && <p className="muted small">{updateMsg}</p>}
+              <p className="muted small">{t('settings.aboutThanks')}</p>
             </section>
           )}
         </div>

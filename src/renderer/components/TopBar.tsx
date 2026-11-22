@@ -179,7 +179,7 @@ export function TopBar({ onRequestFullAccess }: { onRequestFullAccess: () => voi
                 </button>
               </div>
               <div className="menu-scroll" style={{ maxHeight: 360 }}>
-                {models.length === 0 && (
+                {models.filter((m) => m.providerId !== 'local-files').length === 0 && (
                   <div className="menu-empty">
                     <HardDrive size={18} />
                     <div>
@@ -196,7 +196,9 @@ export function TopBar({ onRequestFullAccess }: { onRequestFullAccess: () => voi
                     </div>
                   </div>
                 )}
-                {models.map((m) => {
+                {models
+                  .filter((m) => m.providerId !== 'local-files')
+                  .map((m) => {
                   const active = m.providerId === model?.providerId && m.remoteId === model?.modelId
                   return (
                     <button

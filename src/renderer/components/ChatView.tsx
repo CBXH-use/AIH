@@ -42,7 +42,7 @@ export function ChatView() {
   const settings = useAppStore((s) => s.settings)
   const models = useAppStore((s) => s.models)
   const providers = useAppStore((s) => s.providers)
-  const approval = useAppStore((s) => s.approval)
+  const approvals = useAppStore((s) => s.approvals)
   const assistantAvatar = useAppStore((s) => s.settings.ui?.assistantAvatar)
   const newSession = useAppStore((s) => s.newSession)
   const send = useAppStore((s) => s.send)
@@ -73,7 +73,7 @@ export function ChatView() {
   const lastMessage = messages[messages.length - 1]
   const showThinking =
     !!session && session.status === 'running' && !streamingAssistant && (!lastMessage || lastMessage.role === 'user')
-  const approvalForCurrent = approval && session && approval.sessionId === session.id ? approval : null
+  const approvalForCurrent = session ? approvals.find((a) => a.sessionId === session.id) || null : null
   const modelInfo = models.find(
     (m) => session?.model && m.providerId === session.model.providerId && m.remoteId === session.model.modelId
   )

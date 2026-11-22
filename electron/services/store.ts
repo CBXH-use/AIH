@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { AgentPreset, AppSettings, KnowledgeBase, PluginState, Project, Session } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/defaults'
@@ -37,11 +37,19 @@ function deepMerge<T>(base: T, patch: Partial<T>): T {
   return out as T
 }
 
+export interface StoreLoadWarning {
+  /** 损坏的原始文件被改名保留的位置 */
+  corruptFile: string
+  message: string
+  recoveredFromBackup: boolean
+}
+
 export class Store {
   readonly dir: string
   private file: string
   private db: DbShape
   private timer: NodeJS.Timeout | null = null
+  private loadWarning: StoreLoadWarning | null = null
 
   constructor() {
     this.dir = app.getPath('userData')
@@ -50,23 +58,52 @@ export class Store {
     this.db = this.load()
   }
 
+  /** 启动时数据文件损坏/已从备份恢复时的警告，由主进程提示用户 */
+  get warning(): StoreLoadWarning | null {
+    return this.loadWarning
+  }
+
+  private parse(file: string): DbShape {
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    const settings = deepMerge(structuredClone(DEFAULT_SETTINGS), raw.settings || {})
+    // v1 的默认上下文是 32768，会让本地 8B 模型明显变慢；升级时把「仍是旧默认值」的用户降到 8192
+    if ((Number(raw.version) || 1) < 2 && settings.harness.context.window === 32768) {
+      settings.harness.context.window = 8192
+    }
+    return {
+      ...structuredClone(EMPTY_DB),
+      ...raw,
+      version: 2,
+      settings
+    }
+  }
+
   private load(): DbShape {
+    if (!existsSync(this.file)) return structuredClone(EMPTY_DB)
+    const backup = `${this.file}.bak`
     try {
-      if (!existsSync(this.file)) return structuredClone(EMPTY_DB)
-      const raw = JSON.parse(readFileSync(this.file, 'utf8'))
-      const settings = deepMerge(structuredClone(DEFAULT_SETTINGS), raw.settings || {})
-      // v1 的默认上下文是 32768，会让本地 8B 模型明显变慢；升级时把「仍是旧默认值」的用户降到 8192
-      if ((Number(raw.version) || 1) < 2 && settings.harness.context.window === 32768) {
-        settings.harness.context.window = 8192
-      }
-      return {
-        ...structuredClone(EMPTY_DB),
-        ...raw,
-        version: 2,
-        settings
-      }
+      return this.parse(this.file)
     } catch (err) {
-      console.error('[store] load failed, starting fresh', err)
+      const message = err instanceof Error ? err.message : String(err)
+      const corrupt = `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+      // 先把损坏文件改名保留，绝不直接覆盖：用户仍可以拿它去恢复
+      try {
+        renameSync(this.file, corrupt)
+      } catch {
+        /* 改名失败时也不写入：下面的提示会让用户知道需要手动处理 */
+      }
+      if (existsSync(backup)) {
+        try {
+          const db = this.parse(backup)
+          this.loadWarning = { corruptFile: corrupt, message, recoveredFromBackup: true }
+          console.warn('[store] main data file is corrupt, recovered from backup:', message)
+          return db
+        } catch {
+          /* 备份也损坏，继续走空库 */
+        }
+      }
+      this.loadWarning = { corruptFile: corrupt, message, recoveredFromBackup: false }
+      console.error('[store] load failed, corrupt data preserved at', corrupt, message)
       return structuredClone(EMPTY_DB)
     }
   }
@@ -82,6 +119,14 @@ export class Store {
       this.timer = null
     }
     try {
+      // 每次写入前保留上一份成功写入的文件，供损坏时恢复
+      if (existsSync(this.file)) {
+        try {
+          copyFileSync(this.file, `${this.file}.bak`)
+        } catch {
+          /* 备份失败不阻塞正常保存 */
+        }
+      }
       const tmp = this.file + '.tmp'
       writeFileSync(tmp, JSON.stringify(this.db, null, 1), 'utf8')
       renameSync(tmp, this.file)

@@ -20,7 +20,7 @@ export function ApprovalDialog({ request }: { request: ApprovalRequest | null })
 
   const decide = async (choice: 'allow' | 'allow-always' | 'deny') => {
     setBusy(true)
-    await approve(choice)
+    await approve(request.id, choice)
   }
 
   return (
@@ -94,7 +94,7 @@ export function ApprovalInline({ request }: { request: ApprovalRequest }) {
 
   const decide = async (choice: 'allow' | 'allow-always' | 'deny') => {
     setBusy(true)
-    await approve(choice)
+    await approve(request.id, choice)
   }
 
   return (

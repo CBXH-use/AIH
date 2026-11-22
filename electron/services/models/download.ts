@@ -45,15 +45,48 @@ export async function downloadToFile(
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
       const total = Number(res.headers.get('content-length')) || 0
       const out = createWriteStream(tmp)
+      // 磁盘满/权限不足时写流会 emit('error')；不监听会变成未捕获异常，且 drain 永远不会触发导致永久卡住
+      let streamError: Error | null = null
+      out.on('error', (err) => {
+        streamError = err
+      })
       let received = 0
       let lastReport = 0
       const nodeStream = Readable.fromWeb(res.body as never)
+
+      const writeChunk = async (chunk: Buffer) => {
+        if (streamError) throw streamError
+        if (out.write(chunk)) return
+        await new Promise<void>((resolve, reject) => {
+          const cleanup = () => {
+            out.off('drain', onDrain)
+            out.off('error', onError)
+            attempt.signal.removeEventListener('abort', onAbort)
+          }
+          const onDrain = () => {
+            cleanup()
+            resolve()
+          }
+          const onError = (err: Error) => {
+            cleanup()
+            reject(err)
+          }
+          const onAbort = () => {
+            cleanup()
+            reject(new Error('已取消'))
+          }
+          out.once('drain', onDrain)
+          out.once('error', onError)
+          attempt.signal.addEventListener('abort', onAbort, { once: true })
+        })
+        if (streamError) throw streamError
+      }
 
       try {
         for await (const chunk of nodeStream as AsyncIterable<Buffer>) {
           if (signal.aborted) throw new Error('已取消')
           touch()
-          if (!out.write(chunk)) await new Promise<void>((resolve) => out.once('drain', () => resolve()))
+          await writeChunk(chunk)
           received += chunk.length
           const now = Date.now()
           if (now - lastReport > 120) {
@@ -61,7 +94,10 @@ export async function downloadToFile(
             onProgress?.({ ratio: total ? Math.min(1, received / total) : 0, received, total })
           }
         }
+        if (streamError) throw streamError
         await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())))
+        if (streamError) throw streamError
+        if (total && received !== total) throw new Error(`下载不完整（${received}/${total} 字节）`)
       } catch (err) {
         out.destroy()
         throw err
