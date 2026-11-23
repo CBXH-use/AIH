@@ -59,6 +59,8 @@ const EVAL_CLI = process.argv.includes('--eval')
 const SELF_TEST_CLI = process.argv.includes('--self-test')
 /** --smoke-ui 打开窗口后检查渲染层关键元素（图片协议/CSP 是否真的生效），结果写入 --smoke-out */
 const SMOKE_UI_CLI = process.argv.includes('--smoke-ui')
+/** --update-check[=<version>] 用真实 GitHub Release 走一遍更新检查（只读，不下载） */
+const UPDATE_CHECK_ARG = process.argv.find((a) => a === '--update-check' || a.startsWith('--update-check='))
 
 function cliArg(name: string): string | null {
   const prefix = `--${name}=`
@@ -852,6 +854,24 @@ if (hasSingleInstanceLock) {
       })
 
       registerIpc()
+
+      // 只读更新检查（发版后验证新版本对老版本客户端可见）
+      if (UPDATE_CHECK_ARG) {
+        void (async () => {
+          const override = UPDATE_CHECK_ARG.includes('=') ? UPDATE_CHECK_ARG.split('=')[1] : ''
+          const probe = new UpdateService({
+            userDataDir: store.dir,
+            currentVersion: override || app.getVersion(),
+            emit: () => undefined,
+            quit: () => undefined
+          })
+          const res = await probe.check(true)
+          console.log(JSON.stringify(res, null, 2))
+          process.exitCode = res.ok && (!res.data?.hasUpdate || res.data.canAutoInstall) ? 0 : 4
+          app.quit()
+        })()
+        return
+      }
 
       // 无窗口评测模式（CI/发版前跑）：不建窗口、不探测硬件，跑完直接退出
       if (EVAL_CLI) {
