@@ -4,8 +4,8 @@ import { X } from 'lucide-react'
 import { useAppStore } from '../store'
 import { useT } from '../i18n'
 
-/** 读取图片并压缩成小尺寸 data URL，避免设置文件过大 */
-export async function imageFileToDataUrl(file: File, maxSize = 256): Promise<string> {
+/** 读取图片并压缩成 data URL；maxSize 控制最长边，quality 用于 JPEG 重编码 */
+export async function imageFileToDataUrl(file: File, maxSize = 256, quality = 0.82): Promise<string> {
   if (!file.type.startsWith('image/')) throw new Error('not-image')
   if (file.size > 8 * 1024 * 1024) throw new Error('too-large')
   const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -20,16 +20,32 @@ export async function imageFileToDataUrl(file: File, maxSize = 256): Promise<str
     image.onerror = reject
     image.src = dataUrl
   })
-  const scale = Math.min(1, maxSize / Math.max(img.width, img.height))
-  const w = Math.max(1, Math.round(img.width * scale))
-  const h = Math.max(1, Math.round(img.height * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return dataUrl
-  ctx.drawImage(img, 0, 0, w, h)
-  return canvas.toDataURL('image/png')
+  const render = (limit: number, type: string): string => {
+    const scale = Math.min(1, limit / Math.max(img.width, img.height))
+    const w = Math.max(1, Math.round(img.width * scale))
+    const h = Math.max(1, Math.round(img.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return dataUrl
+    ctx.drawImage(img, 0, 0, w, h)
+    return canvas.toDataURL(type, quality)
+  }
+  // 截图/带透明通道的图保留 PNG（文字更清晰）；照片类压成 JPEG 体积更小
+  const keepPng = /png|webp|gif|svg/i.test(file.type)
+  let out = render(maxSize, keepPng ? 'image/png' : 'image/jpeg')
+  if (out.length > 2_000_000) {
+    // 仍然太大时降到 JPEG 并缩小，保证落盘和发给模型都不至于卡住
+    out = render(Math.min(maxSize, 720), 'image/jpeg')
+  }
+  return out
+}
+
+/** 落盘图片的显示地址（自定义协议由主进程注册） */
+export function imageSrc(part: { dataUrl?: string; file?: string }): string {
+  if (part.file) return `aih-attachment://local/${part.file.split('\\').join('/')}`
+  return part.dataUrl || ''
 }
 
 export function AssistantAvatar({ size = 26, className = '' }: { size?: number; className?: string }) {

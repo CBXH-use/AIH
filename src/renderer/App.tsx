@@ -34,12 +34,22 @@ export default function App() {
     const offChat = window.aih.onChatEvent((e) => useAppStore.getState().handleChatEvent(e))
     const offScan = window.aih.onScanEvent((e) => useAppStore.getState().handleScanEvent(e))
     const offDeploy = window.aih.onDeployEvent((e) => useAppStore.getState().handleDeployEvent(e))
+    // 硬件探测晚于首屏：拿到结果后把适配评分合并进已有模型列表
+    const offFit = window.aih.onModelsFit((models) => {
+      useAppStore.setState((state) => {
+        const byId = new Map(models.map((m) => [m.id, m]))
+        const merged = state.models.map((m) => byId.get(m.id) || m)
+        for (const m of models) if (!merged.some((x) => x.id === m.id)) merged.push(m)
+        return { models: merged }
+      })
+    })
     const offApproval = window.aih.onApproval((req) => useAppStore.getState().addApproval(req))
     const offSettings = window.aih.onSettings((s) => useAppStore.setState({ settings: s }))
     return () => {
       offChat()
       offScan()
       offDeploy()
+      offFit()
       offApproval()
       offSettings()
     }

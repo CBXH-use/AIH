@@ -19,7 +19,7 @@ AIH 的安装包发布在 GitHub Releases。国内直连 GitHub 可能较慢，�
 Release 说明里会给出每个文件的 SHA256，同时提供 `SHA256SUMS.txt` 汇总文件。下载后在 PowerShell 里执行：
 
 ```powershell
-Get-FileHash .\AIH-0.1.2-setup.exe -Algorithm SHA256
+Get-FileHash .\AIH-0.1.3-setup.exe -Algorithm SHA256
 ```
 
 与 Release 中的值一致即可放心安装。
@@ -34,7 +34,7 @@ Get-FileHash .\AIH-0.1.2-setup.exe -Algorithm SHA256
 示例：
 
 ```
-https://ghproxy.net/https://github.com/CBXH-use/AIH/releases/download/v0.1.2/AIH-0.1.2-setup.exe
+https://ghproxy.net/https://github.com/CBXH-use/AIH/releases/download/v0.1.3/AIH-0.1.3-setup.exe
 ```
 
 官网下载页也会自动读取最新版本并生成加速链接。

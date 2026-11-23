@@ -4,6 +4,7 @@ import {
   Cpu,
   Database,
   FolderOpen,
+  FlaskConical,
   History,
   ImagePlus,
   Info,
@@ -18,12 +19,14 @@ import {
   Sparkles,
   Trash2
 } from 'lucide-react'
-import type { HarnessConfig, PermissionMode } from '@shared/types'
+import type { EvalEvent, EvalReport, EvalTaskInfo } from '@shared/eval'
+import type { HarnessConfig, PermissionMode, ThinkingConfig } from '@shared/types'
+import type { UpdateCheckResult, UpdatePhase } from '@shared/ipc'
 import { useAppStore } from '../store'
 import { useT } from '../i18n'
 import { Badge, imageFileToDataUrl, PageHeader, Switch } from '../components/ui'
 
-type Section = 'general' | 'harness' | 'context' | 'safety' | 'data' | 'snapshots' | 'about'
+type Section = 'general' | 'harness' | 'context' | 'safety' | 'eval' | 'data' | 'snapshots' | 'about'
 
 export function SettingsPage() {
   const t = useT()
@@ -46,27 +49,121 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [rawOpen, setRawOpen] = useState(false)
   const [checking, setChecking] = useState(false)
-  const [updateMsg, setUpdateMsg] = useState<string | null>(null)
+  const [update, setUpdate] = useState<UpdateCheckResult | null>(null)
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase | 'idle'>('idle')
+  const [updateProgress, setUpdateProgress] = useState(0)
+  const [updateNote, setUpdateNote] = useState<string | null>(null)
+  const [installing, setInstalling] = useState(false)
+  const [evalTasks, setEvalTasks] = useState<EvalTaskInfo[]>([])
+  const [evalRunning, setEvalRunning] = useState(false)
+  const [evalProgress, setEvalProgress] = useState({ index: 0, total: 0 })
+  const [evalReport, setEvalReport] = useState<EvalReport | null>(null)
+  const [evalNote, setEvalNote] = useState<string | null>(null)
   const avatarInputRef = useRef<HTMLInputElement>(null)
 
-  const checkUpdate = async () => {
+  useEffect(() => {
+    void window.aih
+      .listEvalTasks()
+      .then((tasks) => setEvalTasks(tasks))
+      .catch(() => undefined)
+    const off = window.aih.onEvalEvent((e: EvalEvent) => {
+      if (e.phase === 'start') {
+        setEvalRunning(true)
+        setEvalReport(null)
+        setEvalProgress({ index: 0, total: e.total || 0 })
+        setEvalNote(null)
+      } else if (e.phase === 'task-start') {
+        setEvalProgress({ index: e.index || 0, total: e.total || 0 })
+        setEvalNote(e.title ? `${e.taskId} · ${e.title}` : null)
+      } else if (e.phase === 'done' || e.phase === 'cancelled') {
+        setEvalRunning(false)
+        if (e.report) setEvalReport(e.report)
+        if (e.message) setEvalNote(e.message)
+      } else if (e.phase === 'error') {
+        setEvalRunning(false)
+        setEvalNote(e.message || null)
+      }
+    })
+    return off
+  }, [])
+
+  const runEval = async () => {
+    setEvalRunning(true)
+    setEvalReport(null)
+    setEvalNote(null)
+    const res = await window.aih.runEval()
+    if (!res.ok) {
+      setEvalRunning(false)
+      setEvalNote(res.error || t('settings.evalFailed'))
+    } else if (res.data) {
+      setEvalReport(res.data)
+      setEvalRunning(false)
+    }
+  }
+
+  const cancelEval = async () => {
+    await window.aih.cancelEval()
+  }
+
+  useEffect(() => {
+    let alive = true
+    void window.aih
+      .checkUpdate(false)
+      .then((res) => {
+        if (!alive || !res.ok || !res.data) return
+        setUpdate(res.data)
+        setUpdatePhase(res.data.hasUpdate ? 'available' : 'none')
+      })
+      .catch(() => undefined)
+    const off = window.aih.onUpdateEvent((e) => {
+      if (e.result) setUpdate(e.result)
+      setUpdatePhase(e.phase)
+      if (typeof e.progress === 'number') setUpdateProgress(e.progress)
+      if (e.phase === 'error') setUpdateNote(e.message || null)
+      else if (e.message) setUpdateNote(e.message)
+      if (e.phase === 'installing') setInstalling(true)
+    })
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+
+  const checkUpdate = async (force = true) => {
     setChecking(true)
-    setUpdateMsg(null)
+    setUpdateNote(null)
     try {
-      const res = await window.aih.checkUpdate()
+      const res = await window.aih.checkUpdate(force)
       if (!res.ok || !res.data) {
-        setUpdateMsg(res.error || t('settings.checkFailed'))
+        setUpdateNote(res.error || t('settings.checkFailed'))
+        setUpdatePhase('error')
         return
       }
-      const data = res.data
-      if (data.hasUpdate) {
-        setUpdateMsg(t('settings.updateAvailable', { version: data.latest }))
-        await window.aih.openExternal(data.url)
-      } else {
-        setUpdateMsg(t('settings.upToDate', { version: data.current }))
-      }
+      setUpdate(res.data)
+      setUpdatePhase(res.data.hasUpdate ? 'available' : 'none')
+      setUpdateNote(
+        res.data.hasUpdate
+          ? t('settings.updateFound', { version: res.data.latest })
+          : t('settings.upToDate', { version: res.data.current })
+      )
     } finally {
       setChecking(false)
+    }
+  }
+
+  const downloadUpdate = async () => {
+    setUpdateNote(null)
+    const res = await window.aih.downloadUpdate()
+    if (!res.ok) setUpdateNote(t('settings.updateFailed', { error: res.error || '' }))
+  }
+
+  const installUpdate = async () => {
+    setInstalling(true)
+    setUpdateNote(t('settings.updateInstalling'))
+    const res = await window.aih.installUpdate()
+    if (!res.ok) {
+      setInstalling(false)
+      setUpdateNote(t('settings.updateFailed', { error: res.error || '' }))
     }
   }
 
@@ -79,6 +176,13 @@ export function SettingsPage() {
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings.harness), [draft, settings.harness])
 
   const patchDraft = (patch: Partial<HarnessConfig>) => setDraft((d) => ({ ...d, ...patch }))
+  const thinking: ThinkingConfig = draft.thinking || {
+    mode: 'auto',
+    adaptive: true,
+    budgetTokens: 2048,
+    simpleTaskMaxChars: 60
+  }
+  const patchThinking = (patch: Partial<ThinkingConfig>) => patchDraft({ thinking: { ...thinking, ...patch } })
   const patchContext = (patch: Partial<HarnessConfig['context']>) =>
     setDraft((d) => ({ ...d, context: { ...d.context, ...patch } }))
   const patchSafety = (patch: Partial<HarnessConfig['safety']>) =>
@@ -134,6 +238,7 @@ export function SettingsPage() {
     { id: 'harness', icon: BrainCircuit, label: t('settings.nav.harness') },
     { id: 'context', icon: Layers, label: t('settings.nav.context') },
     { id: 'safety', icon: ShieldCheck, label: t('settings.nav.safety') },
+    { id: 'eval', icon: FlaskConical, label: t('settings.nav.eval') },
     { id: 'data', icon: Database, label: t('settings.nav.data') },
     { id: 'snapshots', icon: History, label: t('settings.nav.snapshots') },
     { id: 'about', icon: Info, label: t('settings.nav.about') }
@@ -382,6 +487,42 @@ export function SettingsPage() {
                   <span>{t('settings.toolTimeout')}</span>
                   <input type="number" min={5} max={3600} value={draft.toolTimeoutSec ?? 180} onChange={(e) => patchDraft({ toolTimeoutSec: Number(e.target.value) || 180 })} />
                 </label>
+                <label>
+                  <span>{t('settings.thinkingMode')}</span>
+                  <select value={thinking.mode} onChange={(e) => patchThinking({ mode: e.target.value as ThinkingConfig['mode'] })}>
+                    <option value="auto">{t('settings.thinkingAuto')}</option>
+                    <option value="always">{t('settings.thinkingAlways')}</option>
+                    <option value="never">{t('settings.thinkingNever')}</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{t('settings.thinkingBudget')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={32768}
+                    step={256}
+                    value={thinking.budgetTokens}
+                    onChange={(e) => patchThinking({ budgetTokens: Math.max(0, Number(e.target.value) || 0) })}
+                  />
+                  <em>{t('settings.thinkingBudgetHint')}</em>
+                </label>
+                <label className="switch-line">
+                  <span>{t('settings.thinkingAdaptive')}</span>
+                  <Switch checked={thinking.adaptive} onChange={(v) => patchThinking({ adaptive: v })} />
+                </label>
+                <label>
+                  <span>{t('settings.thinkingSimpleMax')}</span>
+                  <input
+                    type="number"
+                    min={10}
+                    max={400}
+                    value={thinking.simpleTaskMaxChars}
+                    disabled={!thinking.adaptive || thinking.mode !== 'auto'}
+                    onChange={(e) => patchThinking({ simpleTaskMaxChars: Number(e.target.value) || 60 })}
+                  />
+                  <em>{t('settings.thinkingSimpleMaxHint')}</em>
+                </label>
                 <label className="span2">
                   <span>{t('settings.systemSuffix')}</span>
                   <textarea rows={4} value={draft.systemSuffix} onChange={(e) => patchDraft({ systemSuffix: e.target.value })} placeholder={t('settings.systemSuffixHint')} />
@@ -534,6 +675,107 @@ export function SettingsPage() {
                     <span>{t('settings.fullOff')}</span>
                   </div>
                 )}
+              </section>
+            </>
+          )}
+
+          {section === 'eval' && (
+            <>
+              <section className="card">
+                <div className="card-head">
+                  <FlaskConical size={16} />
+                  <h2>{t('settings.eval')}</h2>
+                  <span className="muted small">{t('settings.evalDesc')}</span>
+                </div>
+                <div className="settings-inline-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                  <button className="btn primary sm" onClick={() => void runEval()} disabled={evalRunning || !settings.lastModel}>
+                    {evalRunning ? t('settings.evalRunning', { done: evalProgress.index, total: evalProgress.total }) : t('settings.evalRun')}
+                  </button>
+                  {evalRunning && (
+                    <button className="btn ghost sm" onClick={() => void cancelEval()}>
+                      {t('common.cancel')}
+                    </button>
+                  )}
+                  {evalReport?.reportPath && (
+                    <button className="btn ghost sm" onClick={() => void window.aih.openPath(evalReport.reportPath!)}>
+                      {t('settings.evalOpenReport')}
+                    </button>
+                  )}
+                  <span className="muted small">
+                    {t('settings.evalModel')}: {settings.lastModel?.label || t('common.notSet')}
+                  </span>
+                </div>
+                {!settings.lastModel && <p className="muted small">{t('settings.evalNoModel')}</p>}
+                {evalRunning && (
+                  <div className="deploy-bar update-bar">
+                    <div className="bar">
+                      <span
+                        style={{
+                          width: `${evalProgress.total ? Math.max(2, Math.round((evalProgress.index / evalProgress.total) * 100)) : 4}%`
+                        }}
+                      />
+                    </div>
+                    <div className="deploy-bar-row">
+                      <small>{evalNote || t('settings.evalPreparing')}</small>
+                    </div>
+                  </div>
+                )}
+                {!evalRunning && evalNote && <p className="muted small">{evalNote}</p>}
+                {evalReport && (
+                  <>
+                    <div className="about-grid" style={{ marginTop: 12 }}>
+                      <div>
+                        <span>{t('settings.evalSuccess')}</span>
+                        <strong>
+                          {evalReport.summary.passed}/{evalReport.summary.total} · {evalReport.summary.successRate}%
+                        </strong>
+                      </div>
+                      <div>
+                        <span>{t('settings.evalAvgTime')}</span>
+                        <strong>{evalReport.summary.avgDurationMs} ms</strong>
+                      </div>
+                      <div>
+                        <span>{t('settings.evalAvgTokens')}</span>
+                        <strong>{evalReport.summary.avgTokens}</strong>
+                      </div>
+                      <div>
+                        <span>{t('settings.evalThinking')}</span>
+                        <strong>{evalReport.summary.totalThinkingChars}</strong>
+                      </div>
+                    </div>
+                    <div className="eval-table">
+                      {evalReport.tasks.map((task) => (
+                        <div className={`eval-row ${task.ok ? 'pass' : 'fail'}`} key={task.id}>
+                          <Badge tone={task.ok ? 'green' : 'red'}>{task.ok ? 'PASS' : 'FAIL'}</Badge>
+                          <div className="eval-row-main">
+                            <strong>{task.title}</strong>
+                            <span>
+                              {task.id} · {task.durationMs}ms · {task.tokens} tok · {task.toolCalls} tools
+                            </span>
+                            {!task.ok && task.reason && <em>{task.reason}</em>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <p className="muted small">{t('settings.evalHint')}</p>
+              </section>
+
+              <section className="card">
+                <div className="card-head">
+                  <h2>{t('settings.evalTaskList')}</h2>
+                  <span className="muted small">{evalTasks.length}</span>
+                </div>
+                <div className="eval-task-grid">
+                  {evalTasks.map((task) => (
+                    <div key={task.id}>
+                      <span>{task.id}</span>
+                      <strong>{task.title}</strong>
+                      <em>{task.category}</em>
+                    </div>
+                  ))}
+                </div>
               </section>
             </>
           )}
@@ -693,9 +935,34 @@ export function SettingsPage() {
                 <kbd>{t('settings.shortcutStop')}</kbd>
               </div>
               <div className="settings-inline-row" style={{ flexWrap: 'wrap', gap: 8 }}>
-                <button className="btn ghost sm" onClick={() => void checkUpdate()} disabled={checking}>
+                <button
+                  className="btn ghost sm"
+                  onClick={() => void checkUpdate()}
+                  disabled={checking || updatePhase === 'downloading'}
+                >
                   {checking ? t('settings.checkingUpdate') : t('settings.checkUpdate')}
                 </button>
+                {update?.hasUpdate && update.canAutoInstall && !update.downloadedPath && (
+                  <button
+                    className="btn primary sm"
+                    onClick={() => void downloadUpdate()}
+                    disabled={updatePhase === 'downloading' || installing}
+                  >
+                    {updatePhase === 'downloading'
+                      ? t('settings.updateDownloading', { progress: updateProgress })
+                      : t('settings.updateDownload')}
+                  </button>
+                )}
+                {update?.hasUpdate && update.downloadedPath && (
+                  <button className="btn primary sm" onClick={() => void installUpdate()} disabled={installing}>
+                    {installing ? t('settings.updateInstalling') : t('settings.updateInstall')}
+                  </button>
+                )}
+                {update?.hasUpdate && update.url && (
+                  <button className="btn ghost sm" onClick={() => void window.aih.openExternal(update.url)}>
+                    {t('settings.updateManual')}
+                  </button>
+                )}
                 <button className="btn ghost sm" onClick={() => void window.aih.openDataDir()}>
                   {t('settings.openDataDir')}
                 </button>
@@ -718,7 +985,41 @@ export function SettingsPage() {
                   {t('settings.feedback')}
                 </button>
               </div>
-              {updateMsg && <p className="muted small">{updateMsg}</p>}
+              {(updatePhase === 'downloading' || updatePhase === 'verifying') && (
+                <div className="deploy-bar update-bar">
+                  <div className="bar">
+                    <span style={{ width: `${Math.max(2, updateProgress)}%` }} />
+                  </div>
+                  <div className="deploy-bar-row">
+                    <small>
+                      {updatePhase === 'verifying'
+                        ? t('settings.updateVerifying')
+                        : t('settings.updateDownloading', { progress: updateProgress })}
+                    </small>
+                  </div>
+                </div>
+              )}
+              {update?.downloadedPath && (
+                <div className="inline-ok">
+                  <ShieldCheck size={14} />
+                  <span>{t('settings.updateReady')}</span>
+                </div>
+              )}
+              {updateNote && <p className="muted small">{updateNote}</p>}
+              {update?.hasUpdate && update.notes && (
+                <details className="update-notes">
+                  <summary>{t('settings.updateNotes')}</summary>
+                  <pre>{update.notes}</pre>
+                </details>
+              )}
+              <label className="switch-line">
+                <span>{t('settings.updateAutoCheck')}</span>
+                <Switch
+                  checked={settings.autoUpdateCheck !== false}
+                  onChange={(v) => void updateSettings({ autoUpdateCheck: v })}
+                />
+              </label>
+              <p className="muted small">{t('settings.updateAutoCheckHint')}</p>
               <p className="muted small">{t('settings.aboutThanks')}</p>
             </section>
           )}

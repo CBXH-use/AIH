@@ -20,7 +20,7 @@ import {
 import type { ChatMessage, MessagePart, ToolCall, ToolResult } from '@shared/types'
 import { useAppStore } from '../store'
 import { useT } from '../i18n'
-import { AssistantAvatar } from './ui'
+import { AssistantAvatar, imageSrc } from './ui'
 
 function CodeBlock({ className, children }: { className?: string; children?: React.ReactNode }) {
   const t = useT()
@@ -187,7 +187,9 @@ export function MessageView({
   const grouped = useMemo(() => {
     const text = message.parts.filter((p): p is { type: 'text'; text: string } => p.type === 'text').map((p) => p.text).join('')
     const reasoning = message.parts.filter((p): p is { type: 'reasoning'; text: string } => p.type === 'reasoning').map((p) => p.text).join('')
-    const images = message.parts.filter((p): p is { type: 'image'; dataUrl: string; name?: string } => p.type === 'image')
+    const images = message.parts.filter(
+      (p): p is { type: 'image'; dataUrl?: string; file?: string; name?: string } => p.type === 'image'
+    )
     const notices = message.parts.filter((p): p is { type: 'notice'; level: 'info' | 'warn' | 'error'; text: string } => p.type === 'notice')
     const calls = message.parts.filter((p): p is { type: 'tool-call'; call: ToolCall } => p.type === 'tool-call').map((p) => p.call)
     const results = message.parts.filter((p): p is { type: 'tool-result'; result: ToolResult } => p.type === 'tool-result').map((p) => p.result)
@@ -224,7 +226,7 @@ export function MessageView({
           {grouped.images.length > 0 && (
             <div className="bubble-images">
               {grouped.images.map((img, i) => (
-                <img key={i} src={img.dataUrl} alt={img.name || 'image'} />
+                <img key={i} src={imageSrc(img)} alt={img.name || 'image'} />
               ))}
             </div>
           )}

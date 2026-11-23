@@ -10,6 +10,8 @@ import {
   guessGgufMeta,
   listOllamaDiskModels
 } from './discovery'
+import { readGgufMeta } from './gguf'
+import { formatParamCount } from '@shared/gguf'
 
 const OLLAMA_BASE = 'http://127.0.0.1:11434'
 const LMSTUDIO_BASE = 'http://127.0.0.1:1234'
@@ -411,6 +413,10 @@ export class ModelScanner {
     const started = Date.now()
     let entries = 0
     let found = 0
+    // 解析真实元数据比较耗 IO：限制数量和总时间，剩余文件按文件名猜测
+    let parsedMeta = 0
+    const META_PARSE_LIMIT = 30
+    const META_PARSE_BUDGET_MS = 6000
     const skip = new Set([
       'node_modules',
       '.git',
@@ -453,16 +459,28 @@ export class ModelScanner {
           found++
           const size = await fsp.stat(full).then((s) => s.size).catch(() => 0)
           const modelName = basename(d.name, extname(d.name))
-          const meta = guessGgufMeta(d.name)
+          const guessed = guessGgufMeta(d.name)
+          let meta = null
+          if (parsedMeta < META_PARSE_LIMIT && Date.now() - started < META_PARSE_BUDGET_MS) {
+            parsedMeta++
+            meta = readGgufMeta(full)
+          }
           pushModel({
             id: `local-files::${normalize(full)}`,
             remoteId: modelName,
             providerId: 'local-files',
             providerKind: 'llamacpp',
             name: modelName,
-            parameterSize: meta.parameterSize,
-            quantization: meta.quantization,
+            family: meta?.architecture,
+            parameterSize: formatParamCount(meta?.parameterCount) || guessed.parameterSize,
+            quantization: meta?.quantization || guessed.quantization,
             sizeBytes: size,
+            contextLength: meta?.contextLength,
+            supportsTools: meta?.supportsTools,
+            supportsThinking: meta?.supportsThinking,
+            supportsVision: meta?.supportsVision,
+            parameterCount: meta?.parameterCount,
+            gguf: meta ?? undefined,
             status: 'ready',
             filePath: full
           })

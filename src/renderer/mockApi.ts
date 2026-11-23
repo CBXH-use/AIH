@@ -1,4 +1,4 @@
-﻿﻿﻿import type { AihApi } from '@shared/ipc'
+import type { AihApi } from '@shared/ipc'
 import type {
   AgentPreset,
   AppSettings,
@@ -433,12 +433,23 @@ const mockApi: AihApi = {
     return {
       ok: true,
       data: {
-        current: '0.1.2',
-        latest: '0.1.2',
+        current: '0.1.3',
+        latest: '0.1.3',
         hasUpdate: false,
-        url: 'https://github.com/CBXH-use/AIH/releases'
+        url: 'https://github.com/CBXH-use/AIH/releases',
+        canAutoInstall: false,
+        checkedAt: Date.now()
       }
     }
+  },
+  async downloadUpdate() {
+    return { ok: false, error: '预览模式不支持下载更新' }
+  },
+  async installUpdate() {
+    return { ok: false, error: '预览模式不支持安装更新' }
+  },
+  onUpdateEvent() {
+    return () => {}
   },
   async openDataDir() {},
   async updateSettings(patch) {
@@ -712,6 +723,9 @@ const mockApi: AihApi = {
     scanListeners.add(cb)
     return () => scanListeners.delete(cb)
   },
+  onModelsFit() {
+    return () => undefined
+  },
   onDeployEvent(cb) {
     deployListeners.add(cb)
     return () => deployListeners.delete(cb)
@@ -720,6 +734,16 @@ const mockApi: AihApi = {
     return () => undefined
   },
   onSettings() {
+    return () => undefined
+  },
+  async listEvalTasks() {
+    return []
+  },
+  async runEval() {
+    return { ok: false, error: '预览模式不支持评测' }
+  },
+  async cancelEval() {},
+  onEvalEvent() {
     return () => undefined
   }
 }

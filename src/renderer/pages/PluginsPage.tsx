@@ -148,6 +148,13 @@ export function PluginsPage() {
                   ))}
                 </div>
 
+                {p.installType === 'mcp' && p.mcp && (
+                  <div className="plugin-mcp-cmd">
+                    <ShieldCheck size={12} />
+                    <code>{[p.mcp.command, ...(p.mcp.args || [])].join(' ')}</code>
+                  </div>
+                )}
+
                 {state?.runtime === 'error' && (
                   <div className="plugin-error">
                     <span>{state.error || t('plugins.mcpError')}</span>

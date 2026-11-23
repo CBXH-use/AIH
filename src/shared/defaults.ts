@@ -6,6 +6,12 @@ export const DEFAULT_HARNESS: HarnessConfig = {
   parallelTools: true,
   loopGuard: 3,
   toolMode: 'auto',
+  thinking: {
+    mode: 'auto',
+    adaptive: true,
+    budgetTokens: 2048,
+    simpleTaskMaxChars: 60
+  },
   retryCount: 1,
   maxToolOutputChars: 24000,
   toolTimeoutSec: 180,
@@ -463,6 +469,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fullAccessAcknowledged: false,
   defaultPermissionMode: 'ask',
   pluginCatalogUrl: '',
+  mcpApprovedHashes: [],
+  autoUpdateCheck: true,
   ui: {
     fontSize: 'normal',
     showReasoning: true,
@@ -476,7 +484,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     providers: [],
     defaultModel: null,
     installedModelIds: [],
-    detectedBinaryPaths: {}
+    detectedBinaryPaths: {},
+    toolProtocol: {}
   },
   webSearch: { enabled: true, endpoint: 'https://duckduckgo.com/html/?q=' },
   lastModel: null

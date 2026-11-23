@@ -22,6 +22,7 @@ import type { KnowledgeService } from './knowledgeService'
 import type { PluginService } from './pluginService'
 import type { Store } from './store'
 import { buildTools, pluginToolSpecs, type ToolContext, type ToolSpec } from './harness/tools'
+import { imagePartDataUrl, type AttachmentService } from './attachments'
 
 export type ApprovalDecision = 'allow' | 'allow-always' | 'deny'
 
@@ -30,9 +31,12 @@ export interface ChatEngineDeps {
   models: ModelService
   knowledge: KnowledgeService
   plugins: PluginService
+  attachments: AttachmentService
   emit: (e: ChatStreamEvent) => void
   emitApproval: (req: ApprovalRequest) => void
   requestApproval: (req: ApprovalRequest, signal?: AbortSignal) => Promise<ApprovalDecision>
+  /** 评测/自动化：跳过「完全放行」需要用户先确认的限制（调用方自行承担风险） */
+  fullAccessOverride?: boolean
 }
 
 const EMPTY_USAGE = { input: 0, output: 0, compressed: 0 }
@@ -451,8 +455,8 @@ function textOf(m: ChatMessage): string {
     .join('')
 }
 
-function imagesOf(m: ChatMessage): string[] {
-  return m.parts.filter((p): p is { type: 'image'; dataUrl: string } => p.type === 'image').map((p) => p.dataUrl)
+function imageParts(m: ChatMessage): Extract<ChatMessage['parts'][number], { type: 'image' }>[] {
+  return m.parts.filter((p): p is Extract<ChatMessage['parts'][number], { type: 'image' }> => p.type === 'image')
 }
 
 function newMessage(role: ChatMessage['role'], parts: ChatMessage['parts'] = [], model?: ModelRef | null): ChatMessage {
@@ -473,6 +477,7 @@ function deriveTitle(text: string): string {
 
 export class ChatEngine {
   private runs = new Map<string, AbortController>()
+  private runPromises = new Map<string, Promise<void>>()
   private alwaysAllow = new Map<string, Set<string>>()
   private promptModeModels = new Set<string>()
   private noThinkModels = new Set<string>()
@@ -493,7 +498,11 @@ export class ChatEngine {
     return this.listAgents().find((a) => a.id === id) || BUILTIN_AGENTS[0]
   }
 
-  async send(sessionId: string, text: string, images?: { dataUrl: string; name?: string }[]): Promise<void> {
+  async send(
+    sessionId: string,
+    text: string,
+    images?: { dataUrl?: string; file?: string; name?: string }[]
+  ): Promise<void> {
     const session = this.deps.store.getSession(sessionId)
     if (!session) throw new Error('会话不存在')
     if (this.runs.has(sessionId)) throw new Error('该会话正在运行，请先停止')
@@ -502,8 +511,28 @@ export class ChatEngine {
 
     const parts: ChatMessage['parts'] = []
     if (text.trim()) parts.push({ type: 'text', text })
-    for (const img of images || []) parts.push({ type: 'image', dataUrl: img.dataUrl, name: img.name })
     const userMsg = newMessage('user', parts)
+    for (const img of images || []) {
+      if (img.file) {
+        // 重新生成等场景：图片已经在磁盘上，直接复用
+        userMsg.parts.push({ type: 'image', file: img.file, name: img.name })
+        continue
+      }
+      if (!img.dataUrl) continue
+      try {
+        const saved = await this.deps.attachments.save(img.dataUrl, img.name)
+        userMsg.parts.push({
+          type: 'image',
+          file: saved.file,
+          name: img.name,
+          mime: saved.mime,
+          sizeBytes: saved.sizeBytes
+        })
+      } catch {
+        // 落盘失败时保留内联数据，至少这一轮还能使用
+        userMsg.parts.push({ type: 'image', dataUrl: img.dataUrl, name: img.name })
+      }
+    }
     userMsg.streaming = false
     session.messages.push(userMsg)
     session.status = 'idle'
@@ -513,7 +542,20 @@ export class ChatEngine {
     }
     session.updatedAt = Date.now()
     this.deps.store.upsertSession(session)
-    void this.run(session)
+    let promise: Promise<void>
+    promise = this.run(session)
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.runPromises.get(sessionId) === promise) this.runPromises.delete(sessionId)
+      })
+    this.runPromises.set(sessionId, promise)
+    void promise
+  }
+
+  /** 等待某会话当前这一轮运行结束（评测/自动化用） */
+  async waitForRun(sessionId: string): Promise<void> {
+    const running = this.runPromises.get(sessionId)
+    if (running) await running
   }
 
   stop(sessionId: string) {
@@ -546,7 +588,7 @@ export class ChatEngine {
     if (userIdx < 0) throw new Error('找不到对应的用户消息')
     const userMsg = session.messages[userIdx]
     const text = textOf(userMsg)
-    const images = imagesOf(userMsg).map((d) => ({ dataUrl: d }))
+    const images = imageParts(userMsg).map((p) => ({ file: p.file, dataUrl: p.dataUrl, name: p.name }))
     // 先保存快照：send() 可能失败（会话被占用、模型失效等），失败时必须完整回滚
     const snapshotMessages = session.messages
     const snapshotContext = session.context
@@ -611,7 +653,12 @@ export class ChatEngine {
       const cfg = this.deps.store.settings.harness
       const isChat = session.mode === 'chat'
 
-      if (!isChat && session.permissionMode === 'full' && !this.deps.store.settings.fullAccessAcknowledged) {
+      if (
+        !isChat &&
+        session.permissionMode === 'full' &&
+        !this.deps.store.settings.fullAccessAcknowledged &&
+        !this.deps.fullAccessOverride
+      ) {
         session.permissionMode = 'auto-safe'
         this.emit(session, '', 'notice', '尚未确认完全放行风险，本次已自动降为「自动审批」模式', 'warn')
       }
@@ -817,14 +864,42 @@ export class ChatEngine {
 
   private promptModeFor(session: Session): boolean {
     const cfg = this.deps.store.settings.harness
-    if (cfg.toolMode === 'prompt') return true
-    if (cfg.toolMode === 'native') return false
     const key = `${session.model?.providerId}::${session.model?.modelId}`
+    // 曾经自动降级过的模型：重启后也直接用文本协议，避免每轮都先失败一次
+    const remembered = this.deps.store.settings.modelSettings.toolProtocol?.[key]
+    if (cfg.toolMode === 'prompt' || remembered === 'prompt') return true
+    if (cfg.toolMode === 'native' || remembered === 'native') return false
     if (this.promptModeModels.has(key)) return true
     // 已知不支持原生工具调用的推理模型，直接走文本协议，避免 Ollama 返回 400/500
     if (/deepseek-r1|deepseek-reasoner|qwq|marco-o1/i.test(session.model?.modelId || '')) return true
     const info = this.deps.models.getModels().find((m) => m.id === key)
-    return info?.supportsTools === false
+    if (info?.supportsTools === false) return true
+    // GGUF 没有 chat template 时，llama.cpp 无法把 tools 注入对话，原生调用必然失败
+    if (info?.gguf && info.gguf.hasChatTemplate === false) return true
+    return false
+  }
+
+  /** 记住某模型实际可用的工具协议（自动降级后不再反复试错） */
+  private rememberToolProtocol(session: Session, mode: 'native' | 'prompt') {
+    const key = `${session.model?.providerId}::${session.model?.modelId}`
+    const current = this.deps.store.settings.modelSettings.toolProtocol || {}
+    if (current[key] === mode) return
+    if (Object.keys(current).length > 100) return
+    this.deps.store.updateSettings({
+      modelSettings: { ...this.deps.store.settings.modelSettings, toolProtocol: { ...current, [key]: mode } }
+    })
+  }
+
+  /** 思考决策：全局模式 + 自适应（简单任务不思考） */
+  private thinkDecision(session: Session, isChat: boolean, modelSupportsThinking: boolean): boolean | undefined {
+    if (!modelSupportsThinking) return undefined
+    const cfg = this.deps.store.settings.harness
+    const thinking = cfg.thinking || { mode: 'auto', adaptive: true, budgetTokens: 2048, simpleTaskMaxChars: 60 }
+    if (isChat) return thinking.mode === 'always' ? true : false
+    if (thinking.mode === 'never') return false
+    if (thinking.mode === 'always') return true
+    if (thinking.adaptive && isSimpleRequest(lastUserText(session), thinking.simpleTaskMaxChars)) return false
+    return undefined
   }
 
   /** 用户配置的窗口不能超过模型自身能力，避免小模型被塞爆或 KV 缓存过大 */
@@ -849,14 +924,13 @@ export class ChatEngine {
   ): Promise<ChatStreamResult> {
     const cfg = this.deps.store.settings.harness
     let promptMode = this.promptModeFor(session)
+    if (promptMode) this.rememberToolProtocol(session, 'prompt')
     const isChat = session.mode === 'chat'
     const modelKey = `${session.model?.providerId}::${session.model?.modelId}`
     const modelInfo = this.deps.models
       .getModels()
       .find((m) => m.providerId === session.model?.providerId && (m.remoteId === session.model?.modelId || m.id === modelKey))
-    // 对话模式关闭 thinking，让本地推理模型秒回；任务模式使用模型默认行为，
-    // 避免向不支持 think 参数的 Ollama 版本发送 true 导致 500
-    let thinkOverride = isChat && modelInfo?.supportsThinking ? false : undefined
+    let thinkOverride = this.thinkDecision(session, isChat, modelInfo?.supportsThinking === true)
     // 该模型在任务模式下只输出思考不干活时，后续步骤直接关闭 thinking
     if (modelInfo?.supportsThinking && this.noThinkModels.has(modelKey)) thinkOverride = false
     let emptyRetried = false
@@ -895,6 +969,9 @@ export class ChatEngine {
           numPredict: cfg.maxOutputTokens,
           keepAlive: cfg.keepAliveMin ? `${Math.max(1, cfg.keepAliveMin)}m` : undefined,
           think: thinkOverride,
+          // llama.cpp：按请求关掉思考（Qwen3 等模板支持 enable_thinking）
+          chatTemplateKwargs:
+            provider.kind === 'llamacpp' && thinkOverride !== undefined ? { enable_thinking: thinkOverride } : undefined,
           signal,
           onText: appendDelta('text'),
           onThinking: appendDelta('reasoning')
@@ -929,6 +1006,7 @@ export class ChatEngine {
           err.code === 'no-tools'
         if (canFallback) {
           this.promptModeModels.add(modelKey)
+          this.rememberToolProtocol(session, 'prompt')
           promptMode = true
           assistant.parts = []
           this.deps.emit({ sessionId: session.id, messageId: assistant.id, type: 'reset-message' })
@@ -993,7 +1071,9 @@ export class ChatEngine {
       }
       if (m.role === 'user') {
         const content = textOf(m)
-        const images = imagesOf(m).map((d) => d.split(',')[1] || d)
+        const images = imageParts(m)
+          .map((p) => imagePartDataUrl(p, this.deps.attachments))
+          .filter((v): v is string => !!v)
         if (content || images.length) out.push({ role: 'user', content, images: images.length ? images : undefined })
         continue
       }
@@ -1349,6 +1429,8 @@ export class ChatEngine {
         ready.push({ call, spec: placeholderSpec(call.name), risk: { level: 'low', reasons: [] }, allowed: false, deniedReason: `模型调用了不存在的工具「${call.name}」` })
         continue
       }
+      // 小模型常把数字/布尔写成字符串：先按 schema 修一次类型，再判断参数是否完整
+      call.arguments = coerceToolArgs(spec, call.arguments || {})
       // 参数不完整时直接让模型重试，避免用空参数覆盖文件
       const required = Array.isArray((spec.parameters as any)?.required)
         ? ((spec.parameters as any).required as string[])
@@ -1504,6 +1586,50 @@ function lastUserText(session: Session): string {
     if (session.messages[i].role === 'user') return textOf(session.messages[i])
   }
   return ''
+}
+
+/** 带动作词的请求需要工具/思考；纯问答短句可以省掉思考，直接秒回 */
+const ACTION_WORDS =
+  /(创建|新建|写入|保存|修改|编辑|删除|移除|重命名|运行|执行|安装|部署|构建|编译|测试|重构|实现|修复|排查|生成|做一个|写一个|写个|改成|替换|上传|下载|整理|分析|对比|总结|翻译|规划|设计|找出|检查|扫描|打包|发布|提交|推送|合并|回滚)/i
+
+export function isSimpleRequest(text: string, maxChars = 60): boolean {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!clean) return false
+  if (clean.length > maxChars) return false
+  if (clean.includes('```')) return false
+  return !ACTION_WORDS.test(clean)
+}
+
+/** 按工具参数 schema 做基础类型修复（字符串数字 → number，字符串布尔 → boolean 等） */
+export function coerceToolArgs(spec: ToolSpec, input: Record<string, unknown>): Record<string, unknown> {
+  const properties = (spec.parameters as { properties?: Record<string, unknown> })?.properties || {}
+  const out: Record<string, unknown> = { ...input }
+  for (const [key, rawSchema] of Object.entries(properties)) {
+    const value = out[key]
+    if (value === undefined || value === null) continue
+    const type = (rawSchema as { type?: string })?.type
+    if (type === 'number' || type === 'integer') {
+      if (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim())) {
+        out[key] = Number(value.trim())
+      } else if (typeof value === 'boolean') {
+        out[key] = value ? 1 : 0
+      }
+    } else if (type === 'boolean' && typeof value === 'string') {
+      const text = value.trim().toLowerCase()
+      if (['true', '1', 'yes', 'on', '是'].includes(text)) out[key] = true
+      else if (['false', '0', 'no', 'off', '否'].includes(text)) out[key] = false
+    } else if (type === 'string' && (typeof value === 'number' || typeof value === 'boolean')) {
+      out[key] = String(value)
+    } else if (type === 'array' && !Array.isArray(value) && typeof value === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(value)
+        if (Array.isArray(parsed)) out[key] = parsed
+      } catch {
+        /* 保持原值，交给参数完整性检查 */
+      }
+    }
+  }
+  return out
 }
 
 function placeholderSpec(name: string): ToolSpec {

@@ -31,6 +31,8 @@ export interface ChatStreamOptions {
   numPredict?: number
   keepAlive?: string
   think?: boolean
+  /** llama.cpp 按请求覆盖 chat template 变量（例如 enable_thinking=false） */
+  chatTemplateKwargs?: Record<string, unknown>
   signal: AbortSignal
   onText?: (delta: string) => void
   onThinking?: (delta: string) => void
@@ -129,7 +131,8 @@ export async function streamOllama(opts: ChatStreamOptions): Promise<ChatStreamR
     messages: messages.map((m) => {
       if (m.role === 'tool') return { role: 'tool', content: m.content, tool_name: m.toolName }
       const base: Record<string, unknown> = { role: m.role, content: m.content }
-      if (m.images?.length) base.images = m.images
+      // Ollama 的 images 只接受不带 data: 前缀的 base64
+      if (m.images?.length) base.images = m.images.map((img) => img.replace(/^data:[^;]+;base64,/, ''))
       if (m.toolCalls?.length) {
         base.tool_calls = m.toolCalls.map((c) => ({ function: { name: c.name, arguments: c.arguments } }))
       }
@@ -274,6 +277,9 @@ export async function streamOpenAI(opts: ChatStreamOptions): Promise<ChatStreamR
       function: { name: t.name, description: t.description, parameters: t.parameters }
     }))
     payload.tool_choice = 'auto'
+  }
+  if (opts.chatTemplateKwargs && Object.keys(opts.chatTemplateKwargs).length) {
+    payload.chat_template_kwargs = opts.chatTemplateKwargs
   }
 
   let res: Response

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron'
 import { existsSync, mkdirSync, promises as fsp } from 'fs'
 import { cpus, freemem, totalmem } from 'os'
 import { join } from 'path'
@@ -23,19 +23,90 @@ import { BUILTIN_AGENTS, DEFAULT_HARNESS } from '@shared/defaults'
 import { getStore, type StoreLoadWarning } from './services/store'
 import { ModelService } from './services/modelService'
 import { KnowledgeService } from './services/knowledgeService'
-import { PluginService } from './services/pluginService'
+import { PluginService, type McpInstallApproval } from './services/pluginService'
 import { ChatEngine, type ApprovalDecision } from './services/chatEngine'
 import { getHardwareInfo } from './services/hardwareService'
+import { UpdateService } from './services/updateService'
+import { ATTACHMENT_SCHEME, AttachmentService, mimeOf } from './services/attachments'
+import { EvalService } from './services/evalService'
+import { runSelfTest } from './services/selfTest'
+import type { EvalReport, EvalRunOptions } from '@shared/eval'
+
+// 图片落盘后由渲染层通过自定义协议读取；必须在 app ready 之前注册
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: ATTACHMENT_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, bypassCSP: false }
+  }
+])
 
 let mainWindow: BrowserWindow | null = null
 let modelService: ModelService
 let knowledgeService: KnowledgeService
 let pluginService: PluginService
 let chatEngine: ChatEngine
+let updateService: UpdateService
+let attachments: AttachmentService
+let evalService: EvalService
 let scanning: Promise<ModelInfo[]> | null = null
 let hardwareInfo: HardwareInfo | null = null
 
 const pendingApprovals = new Map<string, { resolve: (d: ApprovalDecision) => void; timer: NodeJS.Timeout }>()
+
+/** --eval 无窗口跑评测：electron . --user-data-dir=<临时目录> --eval --eval-base-url=... */
+const EVAL_CLI = process.argv.includes('--eval')
+/** --self-test 无窗口验证纯逻辑（更新校验、MCP 白名单、GGUF、附件、适配评分、评测集） */
+const SELF_TEST_CLI = process.argv.includes('--self-test')
+/** --smoke-ui 打开窗口后检查渲染层关键元素（图片协议/CSP 是否真的生效），结果写入 --smoke-out */
+const SMOKE_UI_CLI = process.argv.includes('--smoke-ui')
+
+function cliArg(name: string): string | null {
+  const prefix = `--${name}=`
+  const hit = process.argv.find((a) => a.startsWith(prefix))
+  return hit ? hit.slice(prefix.length) : null
+}
+
+async function runEvalCli(): Promise<void> {
+  const baseUrl = cliArg('eval-base-url')
+  const modelArg = cliArg('eval-model')
+  const taskIds = cliArg('eval-tasks')
+    ?.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const out = cliArg('out')
+  let provider: Provider | undefined
+  let model: EvalRunOptions['model']
+  if (baseUrl) {
+    const modelId = modelArg?.split('::')[1] || 'mock'
+    provider = {
+      id: 'eval-mock',
+      name: 'Eval Mock',
+      kind: 'openai',
+      baseUrl,
+      models: [modelId],
+      isLocal: true,
+      enabled: true,
+      state: 'online'
+    }
+    model = { providerId: 'eval-mock', modelId, label: `eval-mock/${modelId}` }
+  } else if (modelArg) {
+    const [providerId, modelId] = modelArg.split('::')
+    if (providerId && modelId) model = { providerId, modelId, label: `${providerId}/${modelId}` }
+  }
+  try {
+    const report = await evalService.run({ provider, model, taskIds })
+    const text = JSON.stringify(report, null, 2)
+    console.log(text)
+    if (out) await fsp.writeFile(out, text, 'utf8')
+    process.exitCode = report.summary.passed === report.summary.total ? 0 : 2
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[eval] failed: ${message}`)
+    process.exitCode = 1
+  } finally {
+    app.quit()
+  }
+}
 
 // 单实例锁：两个实例同时运行会各自整库回写，互相覆盖会话/设置
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
@@ -81,6 +152,64 @@ function askApproval(req: ApprovalRequest, signal?: AbortSignal): Promise<Approv
   })
 }
 
+/** MCP 插件安装确认：把完整命令行展示给用户，默认按钮是「取消」 */
+async function askMcpInstall(req: McpInstallApproval): Promise<boolean> {
+  const detail = [
+    `插件：${req.pluginName}`,
+    `命令：${req.display}`,
+    '',
+    'MCP 插件会在本机执行上面这条命令（首次运行可能需要联网下载依赖包）。',
+    '只有在你信任插件来源时才继续；命令来源不明请点「取消」。',
+    req.warnings.length ? `\n提示：\n- ${req.warnings.join('\n- ')}` : ''
+  ].join('\n')
+  try {
+    const res = await dialog.showMessageBox({
+      type: 'warning',
+      title: '确认安装 MCP 插件',
+      message: '该插件将在本机执行外部命令',
+      detail,
+      buttons: ['允许安装', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    })
+    return res.response === 0
+  } catch {
+    return false
+  }
+}
+
+function registerAttachmentProtocol(service: AttachmentService) {
+  protocol.handle(ATTACHMENT_SCHEME, async (request) => {
+    try {
+      const url = new URL(request.url)
+      const file = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+      const abs = service.resolve(file)
+      if (!abs) return new Response('not found', { status: 404 })
+      const data = await fsp.readFile(abs)
+      return new Response(new Uint8Array(data), {
+        status: 200,
+        headers: { 'Content-Type': mimeOf(file), 'Cache-Control': 'max-age=31536000, immutable' }
+      })
+    } catch {
+      return new Response('error', { status: 500 })
+    }
+  })
+}
+
+/** 把历史会话里内联的 dataUrl 图片搬到磁盘，减小 aih-data.json */
+async function migrateAttachments() {
+  try {
+    const moved = await attachments.migrateInlineImages(getStore().sessions)
+    if (moved > 0) {
+      getStore().flush()
+      console.log(`[attachments] migrated ${moved} inline image(s) to ${attachments.root}`)
+    }
+  } catch (err) {
+    console.warn('[attachments] migration failed', err)
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -110,6 +239,39 @@ function createWindow() {
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow?.focus()
     mainWindow?.webContents.focus()
+    if (!SMOKE_UI_CLI) return
+    setTimeout(() => {
+      void (async () => {
+        let payload: unknown = null
+        try {
+          payload = await mainWindow?.webContents.executeJavaScript(`(() => {
+            const images = Array.from(document.querySelectorAll('img')).map((img) => ({
+              src: img.getAttribute('src') || '',
+              width: img.naturalWidth,
+              height: img.naturalHeight,
+              complete: img.complete
+            }))
+            return {
+              url: location.href,
+              rootChildren: document.querySelector('#root') ? document.querySelector('#root').children.length : 0,
+              images,
+              text: (document.body.innerText || '').slice(0, 300)
+            }
+          })()`)
+        } catch (err) {
+          payload = { error: err instanceof Error ? err.message : String(err) }
+        }
+        const out = cliArg('smoke-out')
+        if (out) {
+          await fsp.writeFile(out, JSON.stringify(payload, null, 2), 'utf8').catch(() => undefined)
+        }
+        console.log(`[smoke-ui] ${JSON.stringify(payload)}`)
+        const images = (payload as { images?: { src?: string; width?: number }[] } | null)?.images || []
+        const ok = images.some((img) => String(img.src || '').startsWith('aih-attachment:') && (img.width || 0) > 0)
+        process.exitCode = ok ? 0 : 3
+        app.quit()
+      })()
+    }, 3500)
   })
   mainWindow.on('maximize', () => broadcast(IPC.windowMaximized, true))
   mainWindow.on('unmaximize', () => broadcast(IPC.windowMaximized, false))
@@ -194,17 +356,6 @@ function fallbackHardware(): HardwareInfo {
     freeRamGb,
     tier: totalRamGb >= 32 ? 'high' : totalRamGb >= 16 ? 'mid' : 'low'
   }
-}
-
-function isNewerVersion(latest: string, current: string): boolean {
-  const a = latest.split('.').map((n) => Number(n) || 0)
-  const b = current.split('.').map((n) => Number(n) || 0)
-  for (let i = 0; i < 3; i++) {
-    const x = a[i] || 0
-    const y = b[i] || 0
-    if (x !== y) return x > y
-  }
-  return false
 }
 
 /** 数据文件损坏时给出可操作的提示，而不是静默清空 */
@@ -347,30 +498,11 @@ function registerIpc() {
     userDataDir: getStore().dir
   }))
 
-  ipcMain.handle(IPC.appCheckUpdate, async (): Promise<ApiResult<UpdateCheckResult>> => {
-    try {
-      const res = await fetch('https://api.github.com/repos/CBXH-use/AIH/releases/latest', {
-        headers: { 'User-Agent': `AIH/${app.getVersion()}`, Accept: 'application/vnd.github+json' },
-        signal: AbortSignal.timeout(8000)
-      })
-      if (!res.ok) return { ok: false, error: `检查更新失败：HTTP ${res.status}` }
-      const data = (await res.json()) as { tag_name?: string; html_url?: string; body?: string }
-      const latest = String(data.tag_name || '').replace(/^v/i, '')
-      const current = app.getVersion()
-      return {
-        ok: true,
-        data: {
-          current,
-          latest,
-          hasUpdate: !!latest && isNewerVersion(latest, current),
-          url: String(data.html_url || 'https://github.com/CBXH-use/AIH/releases'),
-          notes: typeof data.body === 'string' ? data.body.slice(0, 4000) : ''
-        }
-      }
-    } catch (err) {
-      return { ok: false, error: `检查更新失败：${err instanceof Error ? err.message : String(err)}` }
-    }
+  ipcMain.handle(IPC.appCheckUpdate, (_e, force?: boolean): Promise<ApiResult<UpdateCheckResult>> => {
+    return updateService.check(force === true)
   })
+  ipcMain.handle(IPC.appDownloadUpdate, () => updateService.download())
+  ipcMain.handle(IPC.appInstallUpdate, () => updateService.install())
   ipcMain.handle(IPC.appOpenDataDir, () => {
     void shell.openPath(getStore().dir)
   })
@@ -648,8 +780,7 @@ function registerIpc() {
   ipcMain.handle(IPC.openExternal, (_e, url: string) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
   })
-  ipcMain.handle(IPC.workspaceTree, async (_e, dir: string) => {
-    const result: { name: string; path: string; children?: unknown[] }[] = []
+  ipcMain.handle(IPC.workspaceTree, async (_e, dir: string) => {    const result: { name: string; path: string; children?: unknown[] }[] = []
     const walk = async (base: string, depth: number): Promise<unknown[]> => {
       if (depth > 3) return []
       const items = await fsp.readdir(base, { withFileTypes: true }).catch(() => [])
@@ -665,6 +796,17 @@ function registerIpc() {
     if (existsSync(dir)) result.push(...((await walk(dir, 0)) as typeof result))
     return result
   })
+
+  ipcMain.handle(IPC.evalList, () => evalService.list().map(({ id, title, category, expectTools, mode }) => ({ id, title, category, expectTools, mode })))
+  ipcMain.handle(IPC.evalRun, async (_e, options: EvalRunOptions = {}): Promise<ApiResult<EvalReport>> => {
+    try {
+      const report = await evalService.run(options)
+      return { ok: true, data: report }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle(IPC.evalCancel, () => evalService.cancel())
 }
 
 if (hasSingleInstanceLock) {
@@ -680,29 +822,80 @@ if (hasSingleInstanceLock) {
       )
       knowledgeService = new KnowledgeService(store)
       pluginService = new PluginService(store)
+      pluginService.setMcpApprover(askMcpInstall)
+      attachments = new AttachmentService(join(store.dir, 'attachments'))
+      registerAttachmentProtocol(attachments)
       chatEngine = new ChatEngine({
         store,
         models: modelService,
         knowledge: knowledgeService,
         plugins: pluginService,
+        attachments,
         emit: (e) => broadcast('chat:event', e),
         emitApproval: (req) => broadcast('chat:approval', req),
         requestApproval: askApproval
       })
+      updateService = new UpdateService({
+        userDataDir: store.dir,
+        currentVersion: app.getVersion(),
+        emit: (e) => broadcast(IPC.appUpdateEvent, e),
+        quit: () => app.quit()
+      })
+      evalService = new EvalService({
+        store,
+        models: modelService,
+        knowledge: knowledgeService,
+        plugins: pluginService,
+        attachments,
+        userDataDir: store.dir,
+        emit: (e) => broadcast(IPC.evalEvent, e)
+      })
 
       registerIpc()
+
+      // 无窗口评测模式（CI/发版前跑）：不建窗口、不探测硬件，跑完直接退出
+      if (EVAL_CLI) {
+        void runEvalCli()
+        return
+      }
+      if (SELF_TEST_CLI) {
+        void runSelfTest({ attachments })
+          .then((result) => {
+            console.log(JSON.stringify(result, null, 2))
+            process.exitCode = result.ok ? 0 : 1
+          })
+          .catch((err) => {
+            console.error(`[self-test] failed: ${err instanceof Error ? err.message : String(err)}`)
+            process.exitCode = 1
+          })
+          .finally(() => app.quit())
+        return
+      }
+
       createWindow()
 
       // 先把窗口显示出来，再做硬件探测：nvidia-smi + PowerShell CIM 串行可能耗时数秒
       void getHardwareInfo()
         .then((info) => {
           hardwareInfo = info
+          broadcast(IPC.modelsFitEvent, modelService.setHardware(info))
         })
         .catch(() => {
           hardwareInfo = fallbackHardware()
+          broadcast(IPC.modelsFitEvent, modelService.setHardware(hardwareInfo))
         })
 
       if (store.warning) setTimeout(() => void showStoreWarning(store.warning!), 800)
+
+      // 历史内联图片迁移到磁盘（不阻塞首屏；完成后立即落盘腾出 aih-data.json 体积）
+      setTimeout(() => void migrateAttachments(), 1500)
+
+      // 后台静默检查更新（只读 Release 元数据，不自动下载）；用户也可以随时在关于页手动检查
+      if (app.isPackaged && store.settings.autoUpdateCheck !== false && net.isOnline()) {
+        setTimeout(() => {
+          void updateService.check(false).catch(() => undefined)
+        }, 8000)
+      }
 
       // 老用户启动时后台快速探测本地模型（不扫描磁盘 GGUF，避免拖慢启动）
       if (store.settings.onboardingDone) {

@@ -69,4 +69,7 @@ jobs:
             release/AIH-*-setup.exe
             release/AIH-*-win-x64.zip
             release/SHA256SUMS.txt
+            release/latest.yml
+            release/*.blockmap
+          fail_on_unmatched_files: false
           generate_release_notes: true

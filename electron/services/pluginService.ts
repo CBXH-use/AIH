@@ -3,14 +3,29 @@ import type { AgentPreset, PluginCategory, PluginManifest, PluginState, PluginTo
 import type { Store } from './store'
 import { BUILTIN_PLUGINS, PLUGIN_CATEGORIES, type CatalogEntry } from './plugins/catalog'
 import { McpClient, type McpToolInfo } from './plugins/mcpClient'
+import { isApproved, validateMcpSpec, type McpLaunchSpec, type McpValidation } from './plugins/mcpGuard'
 
 const REMOTE_CATALOG_URL = ''
 const REMOTE_TIMEOUT_MS = 10_000
 const HTTP_TIMEOUT_MS = 20_000
 const MAX_OUTPUT_CHARS = 8_000
 const MCP_HINT = 'MCP 需要网络与 Node.js 20+（确保 npx 可用）'
+const MAX_APPROVED_MCP = 50
 
 const AGENT_CATEGORIES = ['general', 'engineering', 'writing', 'office', 'data'] as const
+
+export interface McpInstallApproval {
+  pluginId: string
+  pluginName: string
+  command: string
+  /** 安装确认弹窗里展示的完整命令行 */
+  display: string
+  warnings: string[]
+  hash: string
+}
+
+/** 由主进程注入的确认回调：返回 false 表示用户取消安装 */
+export type McpApprover = (req: McpInstallApproval) => Promise<boolean>
 
 interface DeclarativeMatch {
   manifest: CatalogEntry
@@ -32,9 +47,15 @@ export class PluginService {
   private clients = new Map<string, McpClient>()
   private mcpTools = new Map<string, McpToolInfo[]>()
   private pendingStarts = new Map<string, Promise<PluginState>>()
+  private approver: McpApprover | null = null
 
   constructor(store: Store) {
     this.store = store
+  }
+
+  /** 主进程注入安装确认（对话框展示完整命令行），未注入时 MCP 插件一律拒绝启动 */
+  setMcpApprover(approver: McpApprover | null) {
+    this.approver = approver
   }
 
   list(): { plugins: PluginManifest[]; states: PluginState[] } {
@@ -80,6 +101,17 @@ export class PluginService {
     const existing = this.stateOf(id)
     // 幂等：已安装则直接返回当前状态
     if (existing?.installed) return { ok: true, data: existing }
+
+    // MCP 插件会启动真实子进程：先过白名单，再让用户确认完整命令行
+    if (manifest.installType === 'mcp') {
+      const check = this.checkMcp(manifest)
+      if (!check.ok) return { ok: false, error: check.error }
+      if (!isApproved(check.hash, this.store.settings.mcpApprovedHashes)) {
+        const accepted = await this.askMcpApproval(manifest, check)
+        if (!accepted) return { ok: false, error: '已取消安装：MCP 启动命令未获得确认' }
+        this.rememberMcpApproval(check.hash)
+      }
+    }
 
     const state: PluginState = {
       manifestId: manifest.id,
@@ -133,6 +165,14 @@ export class PluginService {
     if (manifest.installType === 'mcp') {
       if (state.enabled && state.runtime === 'ready' && this.clients.has(id)) {
         return { ok: true, data: state }
+      }
+      // 老版本装过、但这条命令还没被确认时，这里补一次确认，避免只能卸载重装
+      const check = this.checkMcp(manifest)
+      if (!check.ok) return { ok: false, error: check.error }
+      if (!isApproved(check.hash, this.store.settings.mcpApprovedHashes)) {
+        const accepted = await this.askMcpApproval(manifest, check)
+        if (!accepted) return { ok: false, error: '已取消启动：MCP 启动命令未获得确认' }
+        this.rememberMcpApproval(check.hash)
       }
       const next = await this.startMcpSafe(manifest, { ...state, enabled: true })
       if (next.runtime === 'ready') return { ok: true, data: next }
@@ -333,6 +373,34 @@ export class PluginService {
     this.store.setPluginStates(states)
   }
 
+  private checkMcp(manifest: CatalogEntry): McpValidation {
+    const spec: McpLaunchSpec = manifest.mcp || { command: '' }
+    return validateMcpSpec({ command: spec.command || '', args: spec.args || [], env: spec.env || {} })
+  }
+
+  private async askMcpApproval(manifest: CatalogEntry, check: McpValidation): Promise<boolean> {
+    if (!this.approver) return false
+    try {
+      return await this.approver({
+        pluginId: manifest.id,
+        pluginName: manifest.name,
+        command: manifest.mcp?.command || '',
+        display: check.display,
+        warnings: check.warnings,
+        hash: check.hash
+      })
+    } catch {
+      return false
+    }
+  }
+
+  private rememberMcpApproval(hash: string) {
+    if (!hash) return
+    const current = this.store.settings.mcpApprovedHashes || []
+    if (current.includes(hash)) return
+    this.store.updateSettings({ mcpApprovedHashes: [hash, ...current].slice(0, MAX_APPROVED_MCP) })
+  }
+
   private startMcpSafe(manifest: CatalogEntry, base: PluginState): Promise<PluginState> {
     const running = this.pendingStarts.get(manifest.id)
     if (running) return running
@@ -357,9 +425,26 @@ export class PluginService {
     }
     this.saveState(state)
 
-    const command = manifest.mcp?.command ?? 'npx'
-    const args = manifest.mcp?.args ?? []
-    const client = new McpClient(manifest.id, command, args, manifest.mcp?.env ?? {})
+    // 启动前再校验一次：即使状态文件被改写，也不会执行未确认/不合规的命令
+    const check = this.checkMcp(manifest)
+    if (!check.ok || !isApproved(check.hash, this.store.settings.mcpApprovedHashes) || !check.resolved) {
+      state = {
+        ...state,
+        runtime: 'error',
+        error: !check.ok
+          ? `${check.error}。${MCP_HINT}`
+          : `该 MCP 启动命令未获得确认，请卸载后重新安装：${check.display}`,
+        tools: []
+      }
+      this.saveState(state)
+      return state
+    }
+
+    const client = new McpClient(
+      manifest.id,
+      { command: manifest.mcp?.command || '', args: manifest.mcp?.args || [], env: manifest.mcp?.env || {} },
+      check.resolved
+    )
 
     try {
       await client.connect()
@@ -730,6 +815,12 @@ function sanitizeRemoteMcp(raw: unknown): { command: string; args?: string[]; en
       if (typeof value === 'string') env[key] = value
     }
     if (Object.keys(env).length) mcp.env = env
+  }
+  // 远程目录里的 MCP 命令必须在白名单内且不含 shell 元字符，否则整条插件直接丢弃
+  const check = validateMcpSpec(mcp)
+  if (!check.ok) {
+    console.warn(`[plugins] rejected remote MCP plugin command: ${check.error}`)
+    return null
   }
   return mcp
 }

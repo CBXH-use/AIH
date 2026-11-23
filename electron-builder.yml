@@ -1,6 +1,12 @@
 appId: com.aih.harness
 productName: AIH
 copyright: Copyright © 2026 AIH
+# 发布源：electron-builder 会据此生成 latest.yml（应用内更新目前直接读 GitHub Release，保留该文件便于以后切换）
+publish:
+  provider: github
+  owner: CBXH-use
+  repo: AIH
+  releaseType: release
 directories:
   output: release
   buildResources: build

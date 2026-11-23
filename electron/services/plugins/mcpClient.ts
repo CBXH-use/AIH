@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawnMcp, type McpLaunchSpec, type ResolvedCommand } from './mcpGuard'
 
 /** MCP 工具描述，供 Harness 暴露给模型 */
 export interface McpToolInfo {
@@ -38,9 +39,8 @@ const STDOUT_BUFFER_LIMIT = 4_000_000
  */
 export class McpClient {
   readonly name: string
-  private readonly command: string
-  private readonly args: string[]
-  private readonly env: Record<string, string | undefined>
+  private readonly spec: McpLaunchSpec
+  private readonly resolved: ResolvedCommand
   private child: ChildProcessWithoutNullStreams | null = null
   private pending = new Map<number, PendingRequest>()
   private nextId = 1
@@ -50,16 +50,10 @@ export class McpClient {
   private connected = false
   private tools: McpToolInfo[] = []
 
-  constructor(
-    name: string,
-    command: string,
-    args: string[] = [],
-    env: Record<string, string | undefined> = {}
-  ) {
+  constructor(name: string, spec: McpLaunchSpec, resolved: ResolvedCommand) {
     this.name = name
-    this.command = command
-    this.args = args
-    this.env = env
+    this.spec = spec
+    this.resolved = resolved
   }
 
   /** 启动子进程并完成 initialize 握手 */
@@ -71,13 +65,8 @@ export class McpClient {
 
     let child: ChildProcessWithoutNullStreams
     try {
-      // Windows 下 npx 是 .cmd，必须经由 shell 才能启动；参数由内置清单控制。
-      child = spawn(this.command, this.args, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...this.env },
-        shell: process.platform === 'win32',
-        windowsHide: true
-      }) as ChildProcessWithoutNullStreams
+      // 白名单校验通过后才启动；spawnMcp 不使用 shell:true，参数不会被二次解释
+      child = spawnMcp(this.spec, this.resolved) as ChildProcessWithoutNullStreams
     } catch (err) {
       throw new Error(`无法启动 MCP 进程：${errorMessage(err)}`)
     }

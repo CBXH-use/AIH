@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AihApi } from '../src/shared/ipc'
 import type { ApprovalRequest, AppSettings, ChatStreamEvent, DeployEvent, ScanEvent } from '../src/shared/types'
-import { IPC } from '../src/shared/ipc'
+import { IPC, type UpdateEvent } from '../src/shared/ipc'
 
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
   const handler = (_e: Electron.IpcRendererEvent, payload: T) => cb(payload)
@@ -12,7 +12,10 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
 const api: AihApi = {
   bootstrap: () => ipcRenderer.invoke(IPC.bootstrap),
   info: () => ipcRenderer.invoke(IPC.info),
-  checkUpdate: () => ipcRenderer.invoke(IPC.appCheckUpdate),
+  checkUpdate: (force?: boolean) => ipcRenderer.invoke(IPC.appCheckUpdate, force === true),
+  downloadUpdate: () => ipcRenderer.invoke(IPC.appDownloadUpdate),
+  installUpdate: () => ipcRenderer.invoke(IPC.appInstallUpdate),
+  onUpdateEvent: (cb: (e: UpdateEvent) => void) => subscribe<UpdateEvent>(IPC.appUpdateEvent, cb),
   openDataDir: () => ipcRenderer.invoke(IPC.appOpenDataDir),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
   saveHarnessSnapshot: (label: string) => ipcRenderer.invoke(IPC.harnessSnapshotSave, label),
@@ -84,9 +87,16 @@ const api: AihApi = {
 
   onChatEvent: (cb: (e: ChatStreamEvent) => void) => subscribe<ChatStreamEvent>('chat:event', cb),
   onScanEvent: (cb: (e: ScanEvent) => void) => subscribe<ScanEvent>(`${IPC.modelsScan}:event`, cb),
+  onModelsFit: (cb: (models: import('../src/shared/types').ModelInfo[]) => void) =>
+    subscribe<import('../src/shared/types').ModelInfo[]>(IPC.modelsFitEvent, cb),
   onDeployEvent: (cb: (e: DeployEvent) => void) => subscribe<DeployEvent>(`${IPC.modelsDeploy}:event`, cb),
   onApproval: (cb: (req: ApprovalRequest) => void) => subscribe<ApprovalRequest>('chat:approval', cb),
-  onSettings: (cb: (s: AppSettings) => void) => subscribe<AppSettings>(IPC.settingsUpdate, cb)
+  onSettings: (cb: (s: AppSettings) => void) => subscribe<AppSettings>(IPC.settingsUpdate, cb),
+
+  listEvalTasks: () => ipcRenderer.invoke(IPC.evalList),
+  runEval: (options) => ipcRenderer.invoke(IPC.evalRun, options),
+  cancelEval: () => ipcRenderer.invoke(IPC.evalCancel),
+  onEvalEvent: (cb) => subscribe<import('../src/shared/eval').EvalEvent>(IPC.evalEvent, cb)
 }
 
 contextBridge.exposeInMainWorld('aih', api)

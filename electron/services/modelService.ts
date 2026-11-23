@@ -11,6 +11,7 @@ import { ModelScanner, type ScanOptions } from './models/scanner'
 import { findOllamaBinary, resolveAihModelsDir } from './models/discovery'
 import { downloadToFile, formatSpeed } from './models/download'
 import { BUILTIN_RUNTIME_ID, RuntimeService } from './runtimeService'
+import { scoreModelFit } from './models/fit'
 
 const OLLAMA_BASE = 'http://127.0.0.1:11434'
 
@@ -63,6 +64,7 @@ export class ModelService {
   private downloading = new Map<string, AbortController>()
   private warmed = new Map<string, number>()
   private store: Store
+  private hardware: HardwareInfo | null = null
   private emitScan: (e: ScanEvent) => void
   private emitDeploy: (e: DeployEvent) => void
 
@@ -101,6 +103,24 @@ export class ModelService {
 
   getModels(): ModelInfo[] {
     return this.models
+  }
+
+  /** 硬件探测完成后调用：给现有模型补上适配评分（bootstrap 之后到达也能刷新 UI） */
+  setHardware(hw: HardwareInfo): ModelInfo[] {
+    this.hardware = hw
+    this.applyFit()
+    return this.models
+  }
+
+  private applyFit() {
+    if (!this.hardware) return
+    for (const model of this.models) {
+      try {
+        model.fit = scoreModelFit(model, this.hardware)
+      } catch {
+        model.fit = undefined
+      }
+    }
   }
 
   recommended(hardware?: HardwareInfo): RecommendedModel[] {
@@ -180,6 +200,7 @@ export class ModelService {
       }
     })
     this.emitScan({ type: 'done' })
+    this.applyFit()
     return this.models
   }
 

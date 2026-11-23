@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowUp, BookOpen, Check, FolderOpen, ImagePlus, Layers, Square } from 'lucide-react'
 import { useAppStore, useCurrentSession } from '../store'
 import { useT } from '../i18n'
-import { Dropdown } from './ui'
+import { Dropdown, imageFileToDataUrl } from './ui'
 interface Attachment {
   dataUrl: string
   name?: string
@@ -50,17 +50,20 @@ export function Composer({ awaitingReply }: { awaitingReply?: boolean }) {
   }, [text])
 
   const addFiles = (files: FileList | File[]) => {
-    const list = Array.from(files).filter((f) => f.type.startsWith('image/')).slice(0, 4 - images.length)
+    const list = Array.from(files)
+      .filter((f) => f.type.startsWith('image/'))
+      .slice(0, 4 - images.length)
     for (const file of list) {
       if (file.size > 8 * 1024 * 1024) {
         toast(t('chat.imagesTooLarge'), 'warn')
         continue
       }
-      const reader = new FileReader()
-      reader.onload = () => {
-        setImages((prev) => [...prev, { dataUrl: String(reader.result), name: file.name }].slice(0, 4))
-      }
-      reader.readAsDataURL(file)
+      // 先压缩再发送：落盘文件更小，发给视觉模型的 token 也更少
+      void imageFileToDataUrl(file, 1280)
+        .then((dataUrl) => {
+          setImages((prev) => [...prev, { dataUrl, name: file.name }].slice(0, 4))
+        })
+        .catch(() => toast(t('chat.imagesTooLarge'), 'warn'))
     }
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "aih",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "AIH - AI HOUSE, a local-first agent harness",
   "main": "./out/main/index.js",
   "author": "AIH",

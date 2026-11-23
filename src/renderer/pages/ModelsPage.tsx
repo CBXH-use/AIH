@@ -428,6 +428,17 @@ export function ModelsPage() {
                       {isDefault && <Badge tone="green">{t('models.default')}</Badge>}
                       {m.supportsTools === true && <Badge tone="blue">{t('models.tools')}</Badge>}
                       {m.supportsTools === false && <Badge tone="amber">{t('models.textProtocol')}</Badge>}
+                      {m.fit && (
+                        <span title={m.fit.reason}>
+                          <Badge
+                            tone={m.fit.level === 'great' ? 'green' : m.fit.level === 'heavy' ? 'red' : 'neutral'}
+                          >
+                            {t(`models.fit.${m.fit.level}`)}
+                          </Badge>
+                        </span>
+                      )}
+                      {m.supportsThinking === true && <Badge tone="blue">{t('models.thinking')}</Badge>}
+                      {m.supportsVision === true && <Badge tone="neutral">{t('models.vision')}</Badge>}
                     </div>
                     <div className="model-meta">
                       <span>{provider?.name || m.providerId}</span>
@@ -435,6 +446,7 @@ export function ModelsPage() {
                       {m.quantization && <span>{m.quantization}</span>}
                       <span>{fmt(m.sizeBytes)}</span>
                       {m.contextLength && <span>{Math.round(m.contextLength / 1024)}K ctx</span>}
+                      {m.fit && <span title={m.fit.reason}>{t('models.fit.ram', { gb: m.fit.requiredRamGb })}</span>}
                     </div>
                   </div>
                   <div className="model-row-actions">

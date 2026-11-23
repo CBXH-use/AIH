@@ -1,3 +1,5 @@
+import type { GgufMeta } from './gguf'
+
 export type ProviderKind = 'ollama' | 'lmstudio' | 'llamacpp' | 'openai' | 'custom'
 
 export type ConnectionState = 'scanning' | 'online' | 'offline' | 'not-installed'
@@ -20,6 +22,21 @@ export interface Provider {
   note?: string
 }
 
+export type ModelFitLevel = 'great' | 'ok' | 'heavy'
+
+/** 模型与当前硬件的适配评分（主进程按内存/显存估算） */
+export interface ModelFit {
+  level: ModelFitLevel
+  /** 估算需要的总内存（GB）：权重 + KV cache + 运行时开销 */
+  requiredRamGb: number
+  weightsGb: number
+  kvCacheGb: number
+  /** 是否能用 GPU 放权重（内置运行时是 CPU 版，恒为 false） */
+  gpuOk?: boolean
+  suggestedContext?: number
+  reason: string
+}
+
 export interface ModelInfo {
   /** unique across providers: `${providerId}::${remoteId}` */
   id: string
@@ -35,6 +52,14 @@ export interface ModelInfo {
   supportsTools?: boolean
   /** 模型是否支持 thinking 开关（Qwen3 / R1 等） */
   supportsThinking?: boolean
+  /** 视觉模型（可读图片） */
+  supportsVision?: boolean
+  /** 由 GGUF 张量维度求出的参数量 */
+  parameterCount?: number
+  /** GGUF 真实元数据（本地文件才有） */
+  gguf?: GgufMeta
+  /** 与当前硬件的适配评分 */
+  fit?: ModelFit
   status: 'ready' | 'downloading' | 'error'
   /** local path of a gguf file when discovered loose on disk */
   filePath?: string
@@ -122,7 +147,8 @@ export interface ToolResult {
 export type MessagePart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
-  | { type: 'image'; dataUrl: string; name?: string }
+  /** 图片：新数据只保存 file（userData/attachments 下的相对路径），dataUrl 仅用于旧数据与保存失败兜底 */
+  | { type: 'image'; dataUrl?: string; file?: string; name?: string; mime?: string; sizeBytes?: number }
   | { type: 'tool-call'; call: ToolCall; risk?: RiskAssessment }
   | { type: 'tool-result'; result: ToolResult }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; text: string }
@@ -189,6 +215,17 @@ export interface ApprovalRequest {
   createdAt: number
 }
 
+/** 思考（reasoning）控制：auto 按任务复杂度判断，always/never 强制开或关 */
+export interface ThinkingConfig {
+  mode: 'auto' | 'always' | 'never'
+  /** 简单任务自动不思考（仅 mode=auto 时生效） */
+  adaptive: boolean
+  /** 思考预算 tokens，0 表示不限制（内置运行时用 --reasoning-budget 实现） */
+  budgetTokens: number
+  /** 请求长度小于该值且不含动作词时视为简单任务 */
+  simpleTaskMaxChars: number
+}
+
 export interface HarnessConfig {
   maxSteps: number
   temperature: number
@@ -196,6 +233,8 @@ export interface HarnessConfig {
   loopGuard: number
   /** auto: 先原生工具调用，模型不支持时自动降级为提示词协议；prompt: 强制文本协议（适配自制小模型） */
   toolMode: 'auto' | 'native' | 'prompt'
+  /** 思考预算与自适应思考 */
+  thinking?: ThinkingConfig
   /** 连接失败重试次数 */
   retryCount?: number
   /** 单次工具结果最大字符数，超出后截断 */
@@ -244,6 +283,8 @@ export interface ModelSettings {
   modelsDir?: string
   /** 用户手动添加给内置运行时使用的 GGUF 文件路径 */
   runtimeGgufPaths?: string[]
+  /** 每个模型实际验证过的工具协议（native=原生工具调用，prompt=文本协议），自动降级的结果会记住 */
+  toolProtocol?: Record<string, 'native' | 'prompt'>
 }
 
 export interface AppSettings {
@@ -258,6 +299,10 @@ export interface AppSettings {
   defaultWorkspaceDir?: string
   /** 可选：插件广场远程目录 JSON 地址；留空则仅使用内置目录 */
   pluginCatalogUrl?: string
+  /** 用户已确认过的 MCP 启动命令指纹（哈希），同一条命令不再重复确认 */
+  mcpApprovedHashes?: string[]
+  /** 启动后静默检查更新（只读 Release 元数据，不自动下载） */
+  autoUpdateCheck?: boolean
   ui?: {
     fontSize?: 'small' | 'normal' | 'large'
     showReasoning?: boolean

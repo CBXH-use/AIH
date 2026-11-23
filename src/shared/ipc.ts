@@ -23,11 +23,15 @@ import type {
   Project,
   SessionMode
 } from './types'
+import type { EvalEvent, EvalReport, EvalRunOptions, EvalTaskInfo } from './eval'
 
 export const IPC = {
   bootstrap: 'app:bootstrap',
   info: 'app:info',
   appCheckUpdate: 'app:check-update',
+  appDownloadUpdate: 'app:download-update',
+  appInstallUpdate: 'app:install-update',
+  appUpdateEvent: 'app:update-event',
   appOpenDataDir: 'app:open-data-dir',
   settingsUpdate: 'settings:update',
   harnessSnapshots: 'harness:snapshots',
@@ -42,6 +46,7 @@ export const IPC = {
   modelsCancelDeploy: 'models:cancel-deploy',
   modelsRemove: 'models:remove',
   modelsRecommended: 'models:recommended',
+  modelsFitEvent: 'models:fit',
   providersSave: 'providers:save',
   providersRemove: 'providers:remove',
   providersTest: 'providers:test',
@@ -93,7 +98,12 @@ export const IPC = {
   pickFiles: 'dialog:pick-files',
   openPath: 'shell:open-path',
   openExternal: 'shell:open-external',
-  workspaceTree: 'workspace:tree'
+  workspaceTree: 'workspace:tree',
+
+  evalList: 'eval:list',
+  evalRun: 'eval:run',
+  evalCancel: 'eval:cancel',
+  evalEvent: 'eval:event'
 } as const
 
 export interface ScanOptions {
@@ -113,18 +123,56 @@ export interface ApiResult<T = void> {
   error?: string
 }
 
+export interface UpdateAsset {
+  name: string
+  url: string
+  size?: number
+}
+
 export interface UpdateCheckResult {
   current: string
   latest: string
   hasUpdate: boolean
   url: string
   notes?: string
+  /** 应用内可以直接下载并安装（有安装包 + 校验文件） */
+  canAutoInstall: boolean
+  installer?: UpdateAsset
+  portable?: UpdateAsset
+  checksums?: UpdateAsset
+  /** 已下载并通过 SHA-256 校验的安装包路径 */
+  downloadedPath?: string
+  checkedAt: number
+}
+
+export type UpdatePhase =
+  | 'checking'
+  | 'available'
+  | 'none'
+  | 'downloading'
+  | 'verifying'
+  | 'downloaded'
+  | 'installing'
+  | 'error'
+
+export interface UpdateEvent {
+  phase: UpdatePhase
+  message?: string
+  /** 0-100 */
+  progress?: number
+  received?: number
+  total?: number
+  version?: string
+  result?: UpdateCheckResult
 }
 
 export interface AihApi {
   bootstrap(): Promise<Bootstrap>
   info(): Promise<AppInfo>
-  checkUpdate(): Promise<ApiResult<UpdateCheckResult>>
+  checkUpdate(force?: boolean): Promise<ApiResult<UpdateCheckResult>>
+  downloadUpdate(): Promise<ApiResult<{ path: string }>>
+  installUpdate(): Promise<ApiResult>
+  onUpdateEvent(cb: (e: UpdateEvent) => void): () => void
   openDataDir(): Promise<void>
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>
   saveHarnessSnapshot(label: string): Promise<HarnessSnapshot[]>
@@ -194,8 +242,14 @@ export interface AihApi {
   openExternal(url: string): Promise<void>
   workspaceTree(dir: string): Promise<{ name: string; path: string; children?: unknown[] }[]>
 
+  listEvalTasks(): Promise<EvalTaskInfo[]>
+  runEval(options?: EvalRunOptions): Promise<ApiResult<EvalReport>>
+  cancelEval(): Promise<void>
+  onEvalEvent(cb: (e: EvalEvent) => void): () => void
+
   onChatEvent(cb: (e: ChatStreamEvent) => void): () => void
   onScanEvent(cb: (e: ScanEvent) => void): () => void
+  onModelsFit(cb: (models: ModelInfo[]) => void): () => void
   onDeployEvent(cb: (e: DeployEvent) => void): () => void
   onApproval(cb: (req: ApprovalRequest) => void): () => void
   onSettings(cb: (s: AppSettings) => void): () => void

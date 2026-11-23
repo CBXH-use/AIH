@@ -60,11 +60,13 @@
 - **内置 llama.cpp 运行时**：运行时随安装包分发，首次使用本地解压，不依赖 GitHub 网络；没有 Ollama 也能运行 GGUF
 - **软件内一键下载**：Qwen2.5 / Qwen3 / DeepSeek R1 / Llama 3.1 / Gemma 2 / Phi-4 / Qwen2.5 Coder 等模型直接下载并启动，ModelScope 失败自动切换 Hugging Face
 - **对话与任务双模式**：任务模式下 Agent 可读写工作区文件、执行命令、联网检索、调用知识库与插件
-- **安全可控**：高风险操作前请求确认、工作区限制、写文件前备份、本地审计日志
+- **安全可控**：高风险操作前请求确认、工作区限制、写文件前备份、本地审计日志；MCP 插件启动命令走白名单，安装前展示完整命令行并要求确认
 - **多智能体与扩展**：内置多种角色预设，支持插件目录、MCP 与知识库
 - **本地优先**：对话、模型与数据默认留在本机；也可以接入 DeepSeek、OpenAI、通义千问、智谱、Moonshot、硅基流动等 OpenAI 兼容 API
-- **数据安全**：单实例运行，数据文件每次保存自动留备份，损坏时可从 `.bak` 恢复并保留原文件
-- **应用内更新检查**：设置 → 关于 → 检查更新（只读取 GitHub Release，不上传任何数据）
+- **数据安全**：单实例运行，数据文件每次保存自动留备份，损坏时可从 `.bak` 恢复并保留原文件；图片附件落盘到 `attachments/`，不会把 base64 塞进主数据文件
+- **小模型体验**：读取 GGUF 真实元数据（上下文、量化、参数量、工具/思考能力），按内存给出「适合 / 可运行 / 配置不足」适配评分；工具协议自动降级（原生 ↔ 文本），思考预算与简单问题自动不思考
+- **可验证**：内置 20 条真实任务评测（设置 → 能力评测），每次发版可跑一遍看成功率、耗时与 token
+- **应用内更新**：设置 → 关于 → 检查更新，直接下载官方安装包并用 `SHA256SUMS.txt` 校验，校验通过后一键退出安装
 
 ## 三步上手
 
@@ -81,6 +83,8 @@
 - 默认不联网：模型扫描、对话、知识库索引都在本机完成
 - 任务模式默认「询问」权限：删除、改系统设置等高风险操作会先请求确认
 - 写文件前自动备份，所有工具调用记录到本地审计日志
+- MCP 插件只允许启动白名单内的命令（npx / node / uvx / python 等），拒绝 shell 元字符与自定义路径；安装时用对话框展示完整命令行，默认按钮是「取消」
+- 更新包从官方 Release 下载，并用 `SHA256SUMS.txt` 校验，校验失败会删除文件
 - 不接入任何遥测；只有你主动添加的云端 API 会收到对应请求
 
 ## 常见问题
@@ -121,18 +125,46 @@ npm run build      # 构建渲染层与主进程
 npm run dist       # 打包安装包与便携版到 release/
 ```
 
+### 自检与评测
+
+不依赖网络和真实模型的自检（更新校验、MCP 白名单与真实子进程、GGUF 解析、图片落盘与协议、适配评分、评测集完整性）：
+
+```bash
+npx electron . --self-test --user-data-dir=%TEMP%\aih-selftest
+```
+
+20 条真实任务评测（需要先有一个可用模型；也可以在「设置 → 能力评测」里点按钮）：
+
+```bash
+npx electron . --eval --user-data-dir=%TEMP%\aih-eval --eval-model=ollama::qwen2.5:7b --out=eval-report.json
+```
+
+本地 mock 模型（开发用，验证工具协议与评测流程，不需要下载真实模型）：
+
+```bash
+node scripts/mock-llm.mjs 18999
+npx electron . --eval --user-data-dir=%TEMP%\aih-eval --eval-base-url=http://127.0.0.1:18999/v1 --eval-model=eval-mock::mock
+```
+
+渲染层冒烟（打开窗口后检查图片协议/CSP 是否真的生效，结果写入 `--smoke-out`）：
+
+```bash
+npx electron . --smoke-ui --user-data-dir=<带图片的临时配置> --smoke-out=smoke.json
+```
+
 `npm run dist` 会自动下载内置 llama.cpp 运行时到 `build/runtime/`（已在本地存在时跳过），然后使用 electron-builder 生成：
 
 - `release/AIH-<version>-setup.exe`
 - `release/AIH-<version>-win-x64.zip`
+- `release/latest.yml`（自动更新元数据）
 
 ## 发布新版本
 
 推送到 GitHub 后，打标签即可触发 GitHub Actions 自动构建并发布：
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 工作流：`.github/workflows/release.yml`，产物会自动附加到对应 Release。

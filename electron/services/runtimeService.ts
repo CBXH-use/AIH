@@ -10,6 +10,8 @@ import type { Provider, ModelInfo } from '@shared/types'
 import type { Store } from './store'
 import { downloadToFile, formatSpeed } from './models/download'
 import { guessGgufMeta, isModelFileName } from './models/discovery'
+import { readGgufMeta } from './models/gguf'
+import { formatParamCount } from '@shared/gguf'
 
 export const BUILTIN_RUNTIME_ID = 'aih-runtime'
 export const BUILTIN_RUNTIME_NAME = 'AIH 本地运行时'
@@ -162,17 +164,25 @@ export class RuntimeService {
       } catch {
         size = undefined
       }
-      const meta = guessGgufMeta(basename(filePath))
+      const meta = readGgufMeta(filePath)
+      const guessed = guessGgufMeta(basename(filePath))
       models.push({
         id: `${BUILTIN_RUNTIME_ID}::${normalize(filePath)}`,
         remoteId: name,
         providerId: BUILTIN_RUNTIME_ID,
         providerKind: 'llamacpp',
         name,
-        parameterSize: meta.parameterSize,
-        quantization: meta.quantization,
+        family: meta?.architecture,
+        parameterSize: formatParamCount(meta?.parameterCount) || guessed.parameterSize,
+        quantization: meta?.quantization || guessed.quantization,
         sizeBytes: size,
-        contextLength: 8192,
+        // 用 GGUF 里真实的上下文长度；解析不到时交给上层按设置里的窗口处理
+        contextLength: meta?.contextLength,
+        supportsTools: meta?.supportsTools,
+        supportsThinking: meta?.supportsThinking,
+        supportsVision: meta?.supportsVision,
+        parameterCount: meta?.parameterCount,
+        gguf: meta ?? undefined,
         status: 'ready',
         filePath
       })
@@ -359,27 +369,21 @@ export class RuntimeService {
       this.stopServer()
 
       const port = await pickPort(RUNTIME_START_PORT)
-      const ctx = Math.max(2048, Math.min(32768, this.store.settings.harness.context.window || 8192))
+      const meta = readGgufMeta(target)
+      const configured = this.store.settings.harness.context.window || 8192
+      // 不能超过模型自身训练/声明的上下文，否则 llama.cpp 会截断或直接报错
+      const ctx = Math.max(2048, Math.min(configured, meta?.contextLength || 32768))
       const threads = Math.max(2, Math.min(16, cpus().length - 1))
       onStep?.(90, '正在启动模型…')
       this.lastLog = ''
-      const child = spawn(
-        exe,
-        [
-          '-m',
-          target,
-          '--host',
-          '127.0.0.1',
-          '--port',
-          String(port),
-          '-c',
-          String(ctx),
-          '--jinja',
-          '-t',
-          String(threads)
-        ],
-        { windowsHide: true, cwd: dirname(exe), stdio: ['ignore', 'pipe', 'pipe'] }
-      )
+      const args = ['-m', target, '--host', '127.0.0.1', '--port', String(port), '-c', String(ctx), '--jinja', '-t', String(threads)]
+      // 思考模型：让 llama.cpp 把思考内容放进 reasoning_content，并支持预算控制
+      if (meta?.supportsThinking === true) {
+        args.push('--reasoning-format', 'deepseek')
+        const budget = this.store.settings.harness.thinking?.budgetTokens ?? 0
+        if (budget > 0) args.push('--reasoning-budget', String(budget))
+      }
+      const child = spawn(exe, args, { windowsHide: true, cwd: dirname(exe), stdio: ['ignore', 'pipe', 'pipe'] })
       this.child = child
       this.port = port
       this.currentModel = target
